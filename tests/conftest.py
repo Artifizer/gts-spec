@@ -43,6 +43,19 @@ def get_gts_base_url() -> str:
 
 
 def pytest_runtest_teardown(item: pytest.Item, nextitem: typing.Optional[pytest.Item]) -> None:
+    # Close httprunner's HTTP session to prevent TCP socket FD leak.
+    # Each test creates a new requests.Session (HttpSession) with keep-alive
+    # connections that are never closed, exhausting the OS file descriptor
+    # limit (~256 on macOS) after ~220 tests.
+    instance = getattr(item, "_testcase", None) or getattr(item, "instance", None)
+    if instance is not None:
+        session = getattr(instance, "session", None)
+        if session is not None and hasattr(session, "close"):
+            try:
+                session.close()
+            except Exception:
+                pass
+
     try:
         from loguru import logger
     except Exception:
