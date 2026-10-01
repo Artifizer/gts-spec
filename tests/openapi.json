@@ -60,6 +60,22 @@
             },
             "name": "validate",
             "in": "query"
+          },
+          {
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "none",
+                "any-present",
+                "any-valid"
+              ],
+              "title": "Ref Validation",
+              "default": "any-valid"
+            },
+            "description": "x-gts-ref validation mode used when validate=true",
+            "name": "gts-ref-validation",
+            "in": "query"
           }
         ],
         "requestBody": {
@@ -175,19 +191,46 @@
         }
       }
     },
-    "/schemas": {
+    "/type-schemas": {
       "post": {
-        "summary": "Register schema by explicit type_id",
-        "operationId": "add_schema_schemas_post",
+        "summary": "Register a batch of GTS Type Schemas",
+        "operationId": "add_type_schemas_type_schemas_post",
+        "parameters": [
+          {
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "title": "Validate",
+              "default": false
+            },
+            "name": "validate",
+            "in": "query"
+          },
+          {
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "none",
+                "any-present",
+                "any-valid"
+              ],
+              "title": "Ref Validation",
+              "default": "any-valid"
+            },
+            "description": "x-gts-ref validation mode used when validate=true",
+            "name": "gts-ref-validation",
+            "in": "query"
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "allOf": [
-                  {
-                    "$ref": "#/components/schemas/SchemaRegister"
-                  }
-                ],
+                "items": {
+                  "type": "object"
+                },
+                "type": "array",
                 "title": "Body"
               }
             }
@@ -258,7 +301,7 @@
     },
     "/extract-id": {
       "post": {
-        "summary": "Extract GTS ID and schema ID from JSON content",
+        "summary": "Extract GTS ID and type ID from JSON content",
         "operationId": "extract_id_extract_id_post",
         "requestBody": {
           "content": {
@@ -429,6 +472,24 @@
       "post": {
         "summary": "Validate instance by GTS ID",
         "operationId": "validate_instance_validate_instance_post",
+        "parameters": [
+          {
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "none",
+                "any-present",
+                "any-valid"
+              ],
+              "title": "Ref Validation",
+              "default": "any-valid"
+            },
+            "description": "x-gts-ref validation mode",
+            "name": "gts-ref-validation",
+            "in": "query"
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -469,17 +530,35 @@
         }
       }
     },
-    "/validate-schema": {
+    "/validate-type-schema": {
       "post": {
-        "summary": "Validate derived schema against base schema",
-        "operationId": "validate_schema_validate_schema_post",
+        "summary": "Validate that a derived GTS Type Schema correctly extends its base chain",
+        "operationId": "validate_type_schema_validate_type_schema_post",
+        "parameters": [
+          {
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "none",
+                "any-present",
+                "any-valid"
+              ],
+              "title": "Ref Validation",
+              "default": "any-valid"
+            },
+            "description": "x-gts-ref validation mode",
+            "name": "gts-ref-validation",
+            "in": "query"
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
                 "allOf": [
                   {
-                    "$ref": "#/components/schemas/ValidateSchemaRequest"
+                    "$ref": "#/components/schemas/ValidateTypeSchemaRequest"
                   }
                 ],
                 "title": "Body"
@@ -495,7 +574,7 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "title": "Response Validate Schema Validate Schema Post"
+                  "title": "Response Validate Type Schema Validate Type Schema Post"
                 }
               }
             }
@@ -515,8 +594,26 @@
     },
     "/validate-entity": {
       "post": {
-        "summary": "Validate entity (instance or schema) by GTS ID",
+        "summary": "Validate entity (instance or type schema) by GTS Identifier",
         "operationId": "validate_entity_validate_entity_post",
+        "parameters": [
+          {
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "none",
+                "any-present",
+                "any-valid"
+              ],
+              "title": "Ref Validation",
+              "default": "any-valid"
+            },
+            "description": "x-gts-ref validation mode",
+            "name": "gts-ref-validation",
+            "in": "query"
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -540,6 +637,95 @@
                 "schema": {
                   "type": "object",
                   "title": "Response Validate Entity Validate Entity Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/validate-json": {
+      "post": {
+        "summary": "Validate transient JSON as a GTS instance or Type Schema",
+        "operationId": "validate_json_validate_json_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "title": "Body"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateJsonResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/validate-json/{gts_type}": {
+      "post": {
+        "summary": "Validate transient JSON against an explicit GTS Type Schema",
+        "operationId": "validate_json_as_type_validate_json__gts_type__post",
+        "parameters": [
+          {
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Gts Type"
+            },
+            "name": "gts_type",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "title": "Body"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateJsonResult"
                 }
               }
             }
@@ -599,25 +785,25 @@
     },
     "/compatibility": {
       "get": {
-        "summary": "Check minor version compatibility",
+        "summary": "Check Type Schema evolution compatibility",
         "operationId": "compatibility_compatibility_get",
         "parameters": [
           {
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Old Schema Id"
+              "title": "Old Type Id"
             },
-            "name": "old_schema_id",
+            "name": "old_type_id",
             "in": "query"
           },
           {
             "required": true,
             "schema": {
               "type": "string",
-              "title": "New Schema Id"
+              "title": "New Type Id"
             },
-            "name": "new_schema_id",
+            "name": "new_type_id",
             "in": "query"
           }
         ],
@@ -628,6 +814,45 @@
               "application/json": {
                 "schema": {
                   "type": "object",
+                  "properties": {
+                    "old": {
+                      "type": "string"
+                    },
+                    "new": {
+                      "type": "string"
+                    },
+                    "backward_compatibility": {
+                      "type": "string",
+                      "enum": [
+                        "compatible",
+                        "incompatible",
+                        "unknown"
+                      ]
+                    },
+                    "forward_compatibility": {
+                      "type": "string",
+                      "enum": [
+                        "compatible",
+                        "incompatible",
+                        "unknown"
+                      ]
+                    },
+                    "full_compatibility": {
+                      "type": "string",
+                      "enum": [
+                        "compatible",
+                        "incompatible",
+                        "unknown"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "old",
+                    "new",
+                    "backward_compatibility",
+                    "forward_compatibility",
+                    "full_compatibility"
+                  ],
                   "title": "Response Compatibility Compatibility Get"
                 }
               }
@@ -671,8 +896,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "title": "Response Cast Cast Post"
+                  "$ref": "#/components/schemas/CastResponse"
                 }
               }
             }
@@ -785,21 +1009,63 @@
   },
   "components": {
     "schemas": {
+      "CastResponse": {
+        "properties": {
+          "casted_entity": {
+            "type": "object",
+            "title": "Casted Entity"
+          },
+          "backward_compatibility": {
+            "type": "string",
+            "enum": [
+              "compatible",
+              "incompatible",
+              "unknown"
+            ],
+            "title": "Backward Compatibility"
+          },
+          "forward_compatibility": {
+            "type": "string",
+            "enum": [
+              "compatible",
+              "incompatible",
+              "unknown"
+            ],
+            "title": "Forward Compatibility"
+          },
+          "full_compatibility": {
+            "type": "string",
+            "enum": [
+              "compatible",
+              "incompatible",
+              "unknown"
+            ],
+            "title": "Full Compatibility"
+          }
+        },
+        "type": "object",
+        "required": [
+          "backward_compatibility",
+          "forward_compatibility",
+          "full_compatibility"
+        ],
+        "title": "CastResponse"
+      },
       "CastRequest": {
         "properties": {
           "instance_id": {
             "type": "string",
             "title": "Instance Id"
           },
-          "to_schema_id": {
+          "to_type_id": {
             "type": "string",
-            "title": "To Schema Id"
+            "title": "To Type Id"
           }
         },
         "type": "object",
         "required": [
           "instance_id",
-          "to_schema_id"
+          "to_type_id"
         ],
         "title": "CastRequest"
       },
@@ -816,23 +1082,59 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
-      "SchemaRegister": {
+      "ValidateJsonResult": {
         "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
           "type_id": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Type Id"
           },
-          "schema": {
-            "type": "object",
-            "title": "Schema"
+          "is_type_schema": {
+            "type": "boolean",
+            "title": "Is Type Schema"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
           }
         },
         "type": "object",
         "required": [
+          "ok",
+          "id",
           "type_id",
-          "schema"
+          "is_type_schema",
+          "error"
         ],
-        "title": "SchemaRegister"
+        "title": "ValidateJsonResult"
       },
       "ValidateInstanceRequest": {
         "properties": {
@@ -847,18 +1149,18 @@
         ],
         "title": "ValidateInstanceRequest"
       },
-      "ValidateSchemaRequest": {
+      "ValidateTypeSchemaRequest": {
         "properties": {
-          "schema_id": {
+          "type_id": {
             "type": "string",
-            "title": "Schema Id"
+            "title": "Type Id"
           }
         },
         "type": "object",
         "required": [
-          "schema_id"
+          "type_id"
         ],
-        "title": "ValidateSchemaRequest"
+        "title": "ValidateTypeSchemaRequest"
       },
       "ValidateEntityRequest": {
         "properties": {

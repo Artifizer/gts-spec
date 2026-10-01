@@ -1,0 +1,78 @@
+// purpose: Base MCP Tool manifest schema used to register a tool in a host
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "gts://gts.x.ai.mcp.tool.v1~",
+  "title": "MCP Tool (Base)",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Full GTS chain for this tool manifest (type lineage + instance)."
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]*$",
+      "description": "Tool identifier (machine-safe)."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtime": {
+      "type": "string",
+      "enum": ["python", "node", "bash", "go", "rust", "http"],
+      "description": "Primary execution runtime."
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 600000,
+      "description": "Upper execution time bound."
+    },
+    "security": {
+      "type": "object",
+      "description": "Sandbox/security switches.",
+      "properties": {
+        "allow_network": { "type": "boolean", "default": false },
+        "allow_filesystem": { "type": "boolean", "default": false }
+      },
+      "required": ["allow_network", "allow_filesystem"],
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "Capabilities of the tool type.",
+    },
+    "inputs": {
+      "type": "object",
+      "description": "Named input parameters and simple type metadata.",
+      "patternProperties": {
+        "^[a-z_][a-z0-9_]*$": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "enum": ["string", "number", "boolean", "object", "array"] },
+            "required": { "type": "boolean", "default": false },
+            "enum": { "type": "array", "items": { "type": ["string", "number", "boolean"] } },
+            "description": { "type": "string" }
+          },
+          "required": ["type"],
+          "additionalProperties": false
+        }
+      },
+      "minProperties": 1,
+      "additionalProperties": false
+    },
+    "outputs": {
+      "type": "object",
+      "description": "Primary output descriptor.",
+      "properties": {
+        "type": { "type": "string", "enum": ["string", "number", "boolean", "object", "array"] },
+        "description": { "type": "string" }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["id", "name", "description", "runtime", "timeout_ms", "security", "inputs", "outputs"],
+  "additionalProperties": false
+}

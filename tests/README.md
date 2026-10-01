@@ -49,7 +49,57 @@ This approach provides:
 - **Portability**: Tests can run in any environment with Python and network access
 - **Simplicity**: No complex test harnesses or language interop required
 
+### Server behaviour prerequisites
+
+Some test cases assert behaviour that the specification leaves implementation-defined. Servers under test must satisfy these prerequisites for the suite to pass:
+
+- **Immutable registry** (`OP#6` resubmission cases, e.g. `TestCaseOp6InstanceResubmission` / `TestCaseOp6TypeResubmission`): registration is treated as immutable per identifier. Resubmitting an entity with **identical** content under an existing ID must succeed (`200`), while submitting **changed** content under an already-registered ID must be rejected with `409 Conflict`. Spec §6 does not mandate a mutability policy, so implementations that permit in-place updates will not satisfy these tests.
+- **Non-mutating validation** (`TestCaseOp13_TraitRef_RevalidationPreservesStoredSchema`): validation does not register, replace, or remove entities. An entity accepted without validation remains stored if later validation rejects it; removal is an explicit client operation. A failed registration-with-validation must leave the registry as it was before the request.
+
 ## Running the tests
+
+### With Docker (recommended)
+
+A pre-built image is published to the GitHub Container Registry on every release. The image tag tracks the specification version: `vMAJOR.MINOR` matches the spec, and the `PATCH` segment increments on test-suite changes (e.g. `v0.11.3` runs against spec `0.11`).
+
+Pick the tag that fits your use case:
+
+- `vX.Y.Z` — exact release (e.g. `v0.11.3`). Recommended for CI / reproducible runs.
+- `vX.Y` — rolling tag for the freshest patch of a given spec version (e.g. `v0.11`). Recommended for interactive use when you want to validate against a specific spec version.
+
+> There is no `latest` tag. Multiple spec versions can be maintained in parallel (e.g. a `v0.9.x` backport patch while main is at `0.11`), and a single floating `latest` would not have an unambiguous meaning. Always pin to either `vX.Y.Z` or `vX.Y`.
+
+```bash
+# Start your server on the host (port 8000 in this example)
+<your-server-start-command>
+
+# Run the test suite from the published image (Mac/Docker Desktop)
+docker run --rm ghcr.io/globaltypesystem/gts-spec-tests:v0.11 \
+    --gts-base-url http://host.docker.internal:8000
+
+# Linux hosts (host.docker.internal is not built-in)
+docker run --rm --add-host=host.docker.internal:host-gateway \
+    ghcr.io/globaltypesystem/gts-spec-tests:v0.11 \
+    --gts-base-url http://host.docker.internal:8000
+
+# Pin to an exact release for reproducible CI runs
+docker run --rm ghcr.io/globaltypesystem/gts-spec-tests:v0.11.3 \
+    --gts-base-url http://host.docker.internal:8000
+
+# Run a specific test file or pytest selector
+docker run --rm ghcr.io/globaltypesystem/gts-spec-tests:v0.11 \
+    --gts-base-url http://host.docker.internal:8000 \
+    test_op1_id_validation.py
+```
+
+To rebuild the image locally while iterating on tests:
+
+```bash
+docker build -t gts-spec-tests -f tests/Dockerfile tests
+docker run --rm gts-spec-tests --gts-base-url http://host.docker.internal:8000
+```
+
+### With Python
 
 ```bash
 # Start your server on 8000 port
@@ -72,7 +122,40 @@ export GTS_BASE_URL=http://127.0.0.1:8001
 pytest
 ```
 
+## Generating reusable examples
+
+`generate_examples.py` runs the conformance tests against a GTS server and records the JSON entities submitted to the server. It writes only entities that the server subsequently reports as valid or invalid, preserving the server's actual request payloads rather than recreating them from test source code.
+
+Start a compatible GTS server, then run the generator with the same Python environment used for the test suite:
+
+```bash
+python tests/generate_examples.py
 ```
+
+Use `--gts-base-url` to specify the GTS server URL, `--output` to select another destination, or provide one or more `test_*.py` paths to generate examples from a subset of the suite:
+
+```bash
+python tests/generate_examples.py \
+    --gts-base-url http://127.0.0.1:8000 \
+    --output ./generated-examples \
+    tests/test_op6_schema_validation.py
+```
+
+By default, the generator writes to `gts-test-examples/` with this layout:
+
+```
+gts-test-examples/
+  valid/
+    instances/*.json
+    types/*.schema.json
+  invalid/
+    instances/*.jsonc
+    types/*.schema.jsonc
+```
+
+Invalid JSONC files begin with `// Invalid:` comments containing the validation error returned by the server. Valid examples remain strict JSON so they can be consumed directly by JSON parsers.
+
+The generated corpus is useful beyond end-to-end testing. Static validators can use the valid and invalid pairs as regression fixtures, IDE plugins can surface the embedded invalid-example reasons while editing schemas or instances, and documentation, language bindings, and editor integrations can use the real request payloads as example data without requiring a running registry.
 
 ## Implemented test cases
 

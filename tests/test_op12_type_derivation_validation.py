@@ -1,0 +1,4770 @@
+from .conftest import get_gts_base_url
+from .helpers.http_run_helpers import (
+    register as _register,
+    register_derived as _register_derived,
+    register_derived_redeclared as _register_derived_redeclared,
+    register_instance as _register_instance,
+    validate_type_schema as _validate_type_schema,
+)
+from httprunner import HttpRunner, Config, Step, RunRequest
+
+
+def _make_2level_constraint_drop_steps(
+    ns, prop_name, prop_type, constraint_kw, constraint_val,
+    extra_base=None,
+):
+    """Build teststeps for a 2-level test where derived drops a keyword.
+
+    The base schema has one property with a constraint; the derived
+    schema restates the property without that constraint keyword.
+    Validation must fail (constraint loosened).
+    """
+    base_schema_id = f"gts://gts.x.test12.drop.{ns}.v1~"
+    derived_suffix = f"x.test12._.no_{ns}.v1~"
+    derived_schema_id = base_schema_id + derived_suffix
+    type_id = f"gts.x.test12.drop.{ns}.v1~" + derived_suffix
+
+    base_prop = {"type": prop_type, constraint_kw: constraint_val}
+    if extra_base:
+        base_prop.update(extra_base)
+
+    derived_prop = {"type": prop_type}
+    if extra_base:
+        derived_prop.update(extra_base)
+
+    return [
+        _register(base_schema_id, {
+            "type": "object",
+            "required": [prop_name],
+            "properties": {prop_name: base_prop},
+        }, f"register base with {constraint_kw}"),
+        _register_derived(
+            derived_schema_id, base_schema_id,
+            {"type": "object", "properties": {
+                prop_name: derived_prop,
+            }},
+            f"register derived dropping {constraint_kw}",
+        ),
+        _validate_type_schema(
+            type_id, False,
+            f"validate should fail - {constraint_kw} dropped",
+        ),
+    ]
+
+
+def _make_3level_const_steps(
+    ns, field_name, field_type, l2_const, l3_const, expect_l3_ok,
+):
+    """Build teststeps for a 3-level const conflict or idempotent test.
+
+    Base has a plain typed field. L2 adds const=l2_const (valid).
+    L3 sets const=l3_const. If l3_const != l2_const → fail;
+    if equal → pass (idempotent).
+    """
+    base_schema_id = f"gts://gts.x.test12.{ns}.item.v1~"
+    l2_suffix = f"x.test12._.l2_{ns}.v1~"
+    l3_suffix = f"x.test12._.l3_{ns}.v1~"
+    l2_schema_id = base_schema_id + l2_suffix
+    l3_schema_id = l2_schema_id + l3_suffix
+    l2_type_id = f"gts.x.test12.{ns}.item.v1~" + l2_suffix
+    l3_type_id = l2_type_id + l3_suffix
+
+    return [
+        _register(base_schema_id, {
+            "type": "object",
+            "required": ["itemId", field_name],
+            "properties": {
+                "itemId": {"type": "string"},
+                field_name: {"type": field_type},
+            },
+        }, "register base schema"),
+        _register_derived(
+            l2_schema_id, base_schema_id,
+            {"type": "object", "properties": {
+                field_name: {"type": field_type, "const": l2_const},
+            }},
+            f"register L2 with const {l2_const!r}",
+        ),
+        _validate_type_schema(l2_type_id, True, "validate L2"),
+        _register_derived(
+            l3_schema_id, l2_schema_id,
+            {"type": "object", "properties": {
+                field_name: {"type": field_type, "const": l3_const},
+            }},
+            f"register L3 with const {l3_const!r}",
+        ),
+        _validate_type_schema(l3_type_id, expect_l3_ok, "validate L3"),
+    ]
+
+
+def _make_3level_loosening_steps(
+    ns, field_name, field_type, base_constraint,
+    l2_constraint, l3_constraint, keyword,
+    extra_prop=None, expect_l3_ok=False,
+):
+    """Build teststeps for a 3-level constraint cascade test.
+
+    Base has keyword=base_constraint, L2 tightens to l2_constraint,
+    L3 sets l3_constraint. L2 must pass. L3 result controlled by
+    expect_l3_ok (default False = loosening must fail).
+    """
+    base_schema_id = f"gts://gts.x.test12.{ns}.item.v1~"
+    l2_suffix = f"x.test12._.l2_{ns}.v1~"
+    l3_suffix = f"x.test12._.l3_{ns}.v1~"
+    l2_schema_id = base_schema_id + l2_suffix
+    l3_schema_id = l2_schema_id + l3_suffix
+    l2_type_id = f"gts.x.test12.{ns}.item.v1~" + l2_suffix
+    l3_type_id = l2_type_id + l3_suffix
+
+    base_prop = {"type": field_type, keyword: base_constraint}
+    l2_prop = {"type": field_type, keyword: l2_constraint}
+    l3_prop = {"type": field_type, keyword: l3_constraint}
+    if extra_prop:
+        base_prop.update(extra_prop)
+        l2_prop.update(extra_prop)
+        l3_prop.update(extra_prop)
+
+    return [
+        _register(base_schema_id, {
+            "type": "object",
+            "required": ["itemId", field_name],
+            "properties": {
+                "itemId": {"type": "string"},
+                field_name: base_prop,
+            },
+        }, f"register base with {keyword} {base_constraint}"),
+        _register_derived(
+            l2_schema_id, base_schema_id,
+            {"type": "object", "properties": {
+                field_name: l2_prop,
+            }},
+            f"register L2 tightening {keyword} to {l2_constraint}",
+        ),
+        _validate_type_schema(l2_type_id, True, "validate L2"),
+        _register_derived(
+            l3_schema_id, l2_schema_id,
+            {"type": "object", "properties": {
+                field_name: l3_prop,
+            }},
+            f"register L3 loosening {keyword} to {l3_constraint}",
+        ),
+        _validate_type_schema(l3_type_id, expect_l3_ok, "validate L3"),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+class TestCaseTestOp12TypeDerivationValidation_DerivedSchemaFullyMatches(HttpRunner):
+    """OP#12 - Type Derivation: Derived schema fully matches base"""
+    config = Config("OP#12 - Fully Matching Derived Schema").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12a.base.user.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["userId", "email"],
+                "properties": {
+                    "userId": {"type": "string", "format": "uuid"},
+                    "email": {"type": "string", "format": "email"},
+                    "tier": {"type": "string", "maxLength": 100}
+                },
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register derived schema that matches base")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12a.base.user.v1~"
+                    "x.test12a._.premium_user.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12a.base.user.v1~"},
+                    {
+                        "type": "object",
+                        "required": ["tier"],
+                        "properties": {
+                            "tier": {
+                                "type": "string",
+                                "enum": ["gold", "platinum"]
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12a.base.user.v1~x.test12a._.premium_user.v1~",
+            True,
+            "validate derived schema against base",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_DerivedSchemaAddsNewFieldsToBaseOne(HttpRunner):
+    """OP#12 - Type Derivation: Derived schema adds new fields to base"""
+    config = Config("OP#12 - Derived Schema Adds New Fields To Base").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12b.base.user.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["userId", "email"],
+                "properties": {
+                    "userId": {"type": "string", "format": "uuid"},
+                    "email": {"type": "string", "format": "email"},
+                    "name": {"type": "string", "maxLength": 100}
+                },
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register derived schema that matches base")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12b.base.user.v1~"
+                    "x.test12b._.premium_user.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12b.base.user.v1~"},
+                    {
+                        "type": "object",
+                        "required": ["subscriptionTier"],
+                        "properties": {
+                            "subscriptionTier": {
+                                "type": "string",
+                                "enum": ["gold", "platinum"]
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12b.base.user.v1~x.test12b._.premium_user.v1~",
+            True,
+            "validate derived schema against base",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_AdditionalPropertiesFalse(
+    HttpRunner
+):
+    """OP#12 - Type Derivation: Base has additionalProperties false"""
+    config = Config(
+        "OP#12 - additionalProperties False Violation"
+    ).base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register closed base schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.closed.account.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["accountId", "email"],
+                "properties": {
+                    "accountId": {"type": "string", "format": "uuid"},
+                    "email": {"type": "string", "format": "email"},
+                    "name": {"type": "string", "maxLength": 100}
+                },
+                "additionalProperties": False
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register derived schema adding properties")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.closed.account.v1~"
+                    "x.test12._.premium_account.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.closed.account.v1~"},
+                    {
+                        "type": "object",
+                        "required": ["tier"],
+                        "properties": {
+                            "tier": {
+                                "type": "string",
+                                "enum": ["gold", "platinum"]
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.closed.account.v1~"
+            "x.test12._.premium_account.v1~",
+            False,
+            "validate should fail - base forbids extra properties",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_CloseOpenModel(HttpRunner):
+    """OP#12 - Type Derivation: Derived closes an open model"""
+    config = Config(
+        "OP#12 - Close Open Model"
+    ).base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register open base schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.close.user.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["userId", "email"],
+                "properties": {
+                    "userId": {"type": "string", "format": "uuid"},
+                    "email": {"type": "string", "format": "email"}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register derived schema closing model")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.close.user.v1~"
+                    "x.test12._.closed_user.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.close.user.v1~"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "userId": {
+                                "type": "string",
+                                "format": "uuid"
+                            },
+                            "email": {
+                                "type": "string",
+                                "format": "email"
+                            }
+                        },
+                        "additionalProperties": False
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.close.user.v1~"
+            "x.test12._.closed_user.v1~",
+            True,
+            "validate derived schema should pass",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_NestedAdditionalPropertiesFalse(
+    HttpRunner
+):
+    """OP#12 - Type Derivation: Nested additionalProperties false"""
+    config = Config(
+        "OP#12 - Nested additionalProperties False"
+    ).base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema with closed nested object")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.nested.closed.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["profileId", "profile"],
+                "properties": {
+                    "profileId": {"type": "string"},
+                    "profile": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                            "name": {"type": "string"},
+                            "age": {
+                                "type": "integer",
+                                "minimum": 0
+                            }
+                        },
+                        "additionalProperties": False
+                    }
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register derived schema adding nested property")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.nested.closed.v1~"
+                    "x.test12._.profile_plus.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.nested.closed.v1~"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "profile": {
+                                "type": "object",
+                                "properties": {
+                                    "nickname": {"type": "string"}
+                                }
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.nested.closed.v1~"
+            "x.test12._.profile_plus.v1~",
+            False,
+            "validate derived schema should fail",
+        ),
+    ]
+
+
+class TestCaseTestOp12_NestedClosedDescendantOrphansAncestorProperty(
+    HttpRunner
+):
+    """OP#12 - Descendant nested AP:false must not orphan ancestor properties.
+
+    Base declares routing.source. The derived overlay keeps the top-level
+    routing object but closes that nested object while declaring only
+    routing.target. Under allOf, any routing.source value is rejected by the
+    derived branch, so the derived schema makes an ancestor property unusable
+    and must fail type-schema validation.
+    """
+
+    config = Config(
+        "OP#12 - nested closed descendant orphans ancestor property"
+    ).base_url(get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.nested.orphan.v1~",
+            {
+                "type": "object",
+                "properties": {
+                    "routing": {
+                        "type": "object",
+                        "properties": {
+                            "source": {"type": "string"},
+                        },
+                    },
+                },
+            },
+            "register base with nested routing.source property",
+        ),
+        _register_derived(
+            "gts://gts.x.test12.nested.orphan.v1~x.test12._.child.v1~",
+            "gts://gts.x.test12.nested.orphan.v1~",
+            {
+                "type": "object",
+                "properties": {
+                    "routing": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "target": {"type": "string"},
+                        },
+                    },
+                },
+            },
+            "register derived closing routing without restating source",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.nested.orphan.v1~x.test12._.child.v1~",
+            False,
+            "validate should fail - closed nested branch orphans routing.source",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_InvalidDerivedSchema(
+    HttpRunner
+):
+    """OP#12 - Type Derivation: Invalid derived schema"""
+    config = Config("OP#12 - Invalid Derived Schema").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema with required fields")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.base.order.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["orderId", "customerId", "total"],
+                "properties": {
+                    "orderId": {"type": "string"},
+                    "customerId": {"type": "string"},
+                    "total": {"type": "number", "minimum": 0}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register derived schema contradicting base")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.base.order.v1~"
+                    "x.test12._.bad_order.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.base.order.v1~"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "customerId": False
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.base.order.v1~x.test12._.bad_order.v1~",
+            False,
+            "validate derived schema should fail",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_DerivedSchemaConstraintTighten(
+    HttpRunner
+):
+    """OP#12 - Type Derivation: Derived schema tightens constraints"""
+    config = Config("OP#12 - Tightened Constraints").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema with loose constraints")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.base.text.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["textId", "content"],
+                "properties": {
+                    "textId": {"type": "string"},
+                    "content": {"type": "string", "maxLength": 1000},
+                    "priority": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100
+                    }
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register derived schema with tighter constraints")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.base.text.v1~"
+                    "x.test12._.short_text.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.base.text.v1~"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "maxLength": 500
+                            },
+                            "priority": {
+                                "type": "integer",
+                                "minimum": 10,
+                                "maximum": 50
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.base.text.v1~x.test12._.short_text.v1~",
+            True,
+            "validate derived schema with tighter constraints",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_DerivedSchemaConstraintLoosen(
+    HttpRunner
+):
+    """OP#12 - Type Derivation: Derived schema loosens constraints"""
+    config = Config("OP#12 - Loosened Constraints (Invalid)").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema with strict constraints")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.base.data.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["dataId"],
+                "properties": {
+                    "dataId": {"type": "string"},
+                    "value": {"type": "string", "maxLength": 128}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register derived schema with looser constraints")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.base.data.v1~"
+                    "x.test12._.loose_data.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.base.data.v1~"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "value": {"type": "string", "maxLength": 256}
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.base.data.v1~x.test12._.loose_data.v1~",
+            False,
+            "validate schema with looser constraints should fail",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_DerivedSpecifiesObject(HttpRunner):
+    """OP#12 - Type Derivation: Base has object property,
+    derived specifies it
+    """
+    config = Config(
+        "OP#12 - Derived Specifies Base Object Property"
+    ).base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema with object property")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.objspec.event.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["eventId", "payload"],
+                "properties": {
+                    "eventId": {"type": "string", "format": "uuid"},
+                    "payload": {"type": "object"}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register derived schema specifying the object")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.objspec.event.v1~"
+                    "x.test12._.order_event.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.objspec.event.v1~"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "payload": {
+                                "type": "object",
+                                "required": ["orderId", "amount"],
+                                "properties": {
+                                    "orderId": {"type": "string"},
+                                    "amount": {
+                                        "type": "number",
+                                        "minimum": 0
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.objspec.event.v1~"
+            "x.test12._.order_event.v1~",
+            True,
+            "validate derived schema specifying object",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_3Level_L2SpecifiesObject(HttpRunner):
+    """OP#12 - 3-level: base has object, L2 specifies it, L3 tightens"""
+    config = Config(
+        "OP#12 - 3-Level L2 Specifies Object"
+    ).base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema with object property")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.obj3a.resource.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["resourceId", "metadata"],
+                "properties": {
+                    "resourceId": {"type": "string", "format": "uuid"},
+                    "metadata": {"type": "object"}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register L2 schema specifying the object")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.obj3a.resource.v1~"
+                    "x.test12._.file.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.obj3a.resource.v1~"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "metadata": {
+                                "type": "object",
+                                "required": ["fileName", "size"],
+                                "properties": {
+                                    "fileName": {
+                                        "type": "string",
+                                        "maxLength": 255
+                                    },
+                                    "size": {
+                                        "type": "integer",
+                                        "minimum": 0
+                                    },
+                                    "mimeType": {"type": "string"}
+                                }
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.obj3a.resource.v1~"
+            "x.test12._.file.v1~",
+            True,
+            "validate L2 schema",
+        ),
+        Step(
+            RunRequest("register L3 schema tightening the object")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.obj3a.resource.v1~"
+                    "x.test12._.file.v1~x.test12._.image.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.obj3a.resource.v1~"
+                            "x.test12._.file.v1~"
+                        )
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "metadata": {
+                                "type": "object",
+                                "properties": {
+                                    "fileName": {
+                                        "type": "string",
+                                        "maxLength": 128
+                                    },
+                                    "mimeType": {
+                                        "type": "string",
+                                        "enum": [
+                                            "image/png",
+                                            "image/jpeg",
+                                            "image/webp"
+                                        ]
+                                    },
+                                    "width": {"type": "integer"},
+                                    "height": {"type": "integer"}
+                                }
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.obj3a.resource.v1~"
+            "x.test12._.file.v1~x.test12._.image.v1~",
+            True,
+            "validate L3 schema",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_3Level_L2CompositionL3NestedObject(
+    HttpRunner
+):
+    """OP#12 - 3-level: L2 specifies object as composition,
+    L3 specifies nested
+    """
+    config = Config(
+        "OP#12 - 3-Level L2 Composition L3 Nested Object"
+    ).base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema with object property")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.obj3b.config.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["configId", "settings"],
+                "properties": {
+                    "configId": {"type": "string"},
+                    "settings": {"type": "object"}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register L2 specifying settings as composition")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.obj3b.config.v1~"
+                    "x.test12._.app_config.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.obj3b.config.v1~"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "settings": {
+                                "type": "object",
+                                "required": ["theme", "notifications"],
+                                "properties": {
+                                    "theme": {
+                                        "type": "string",
+                                        "enum": [
+                                            "light", "dark", "system"
+                                        ]
+                                    },
+                                    "language": {
+                                        "type": "string",
+                                        "maxLength": 10
+                                    },
+                                    "notifications": {
+                                        "type": "object"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.obj3b.config.v1~"
+            "x.test12._.app_config.v1~",
+            True,
+            "validate L2 schema",
+        ),
+        Step(
+            RunRequest("register L3 specifying the nested object")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.obj3b.config.v1~"
+                    "x.test12._.app_config.v1~"
+                    "x.test12._.mobile_config.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.obj3b.config.v1~"
+                            "x.test12._.app_config.v1~"
+                        )
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "settings": {
+                                "type": "object",
+                                "properties": {
+                                    "theme": {
+                                        "type": "string",
+                                        "enum": ["light", "dark"]
+                                    },
+                                    "notifications": {
+                                        "type": "object",
+                                        "required": [
+                                            "pushEnabled",
+                                            "frequency"
+                                        ],
+                                        "properties": {
+                                            "pushEnabled": {
+                                                "type": "boolean"
+                                            },
+                                            "frequency": {
+                                                "type": "string",
+                                                "enum": [
+                                                    "realtime",
+                                                    "hourly",
+                                                    "daily"
+                                                ]
+                                            },
+                                            "quietHours": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "start": {
+                                                        "type": "string",
+                                                        "format": "time"
+                                                    },
+                                                    "end": {
+                                                        "type": "string",
+                                                        "format": "time"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.obj3b.config.v1~"
+            "x.test12._.app_config.v1~"
+            "x.test12._.mobile_config.v1~",
+            True,
+            "validate L3 schema",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_3LevelHierarchy_Valid(HttpRunner):
+    """OP#12 - Type Derivation: 3-level hierarchy with valid constraints"""
+    config = Config("OP#12 - 3-Level Valid Hierarchy").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema level 1")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.hierarchy.entity.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["entityId", "type"],
+                "properties": {
+                    "entityId": {"type": "string", "format": "uuid"},
+                    "type": {"type": "string"},
+                    "description": {"type": "string", "maxLength": 500}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register level 2 schema")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.hierarchy.entity.v1~"
+                    "x.test12._.document.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.hierarchy.entity.v1~"},
+                    {
+                        "type": "object",
+                        "required": ["title"],
+                        "properties": {
+                            "title": {"type": "string", "maxLength": 200},
+                            "content": {"type": "string"},
+                            "description": {
+                                "type": "string",
+                                "maxLength": 300
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.hierarchy.entity.v1~"
+            "x.test12._.document.v1~",
+            True,
+            "validate level 2 schema",
+        ),
+        Step(
+            RunRequest("register level 3 schema")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.hierarchy.entity.v1~"
+                    "x.test12._.document.v1~x.test12._.article.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.hierarchy.entity.v1~"
+                            "x.test12._.document.v1~"
+                        )
+                    },
+                    {
+                        "type": "object",
+                        "required": ["author", "publishedAt"],
+                        "properties": {
+                            "author": {"type": "string"},
+                            "publishedAt": {
+                                "type": "string",
+                                "format": "date-time"
+                            },
+                            "title": {"type": "string", "maxLength": 150},
+                            "description": {
+                                "type": "string",
+                                "maxLength": 200
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.hierarchy.entity.v1~"
+            "x.test12._.document.v1~x.test12._.article.v1~",
+            True,
+            "validate level 3 schema",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_3LevelHierarchy_L3ViolatesL2(
+    HttpRunner
+):
+    """OP#12 - Type Derivation: 3-level where L3 violates L2"""
+    config = Config("OP#12 - 3-Level L3 Violates L2").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema level 1")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.hier2.base.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "size": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000
+                    }
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register level 2 schema")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.hier2.base.v1~"
+                    "x.test12._.medium.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.hier2.base.v1~"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "size": {
+                                "type": "integer",
+                                "minimum": 100,
+                                "maximum": 500
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.hier2.base.v1~x.test12._.medium.v1~",
+            True,
+            "validate level 2 schema",
+        ),
+        Step(
+            RunRequest("register level 3 schema violating level 2")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.hier2.base.v1~"
+                    "x.test12._.medium.v1~x.test12._.bad_large.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.hier2.base.v1~"
+                            "x.test12._.medium.v1~"
+                        )
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "size": {
+                                "type": "integer",
+                                "minimum": 100,
+                                "maximum": 800
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.hier2.base.v1~"
+            "x.test12._.medium.v1~x.test12._.bad_large.v1~",
+            False,
+            "validate level 3 schema should fail",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_3LevelHierarchy_L3ViolatesL1(
+    HttpRunner
+):
+    """OP#12 - Type Derivation: 3-level where L3 violates L1"""
+    config = Config("OP#12 - 3-Level L3 Violates L1").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema level 1")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.hier3.root.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["rootId", "status"],
+                "properties": {
+                    "rootId": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "inactive", "pending"]
+                    },
+                    "capacity": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000
+                    }
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register level 2 schema")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.hier3.root.v1~"
+                    "x.test12._.branch.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.hier3.root.v1~"},
+                    {
+                        "type": "object",
+                        "required": ["branchName"],
+                        "properties": {
+                            "branchName": {"type": "string"},
+                            "capacity": {
+                                "type": "integer",
+                                "minimum": 100,
+                                "maximum": 800
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.hier3.root.v1~x.test12._.branch.v1~",
+            True,
+            "validate level 2 schema",
+        ),
+        Step(
+            RunRequest("register level 3 schema violating level 1")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.hier3.root.v1~"
+                    "x.test12._.branch.v1~x.test12._.bad_leaf.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.hier3.root.v1~"
+                            "x.test12._.branch.v1~"
+                        )
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "status": {
+                                "type": "string",
+                                "enum": [
+                                    "active",
+                                    "inactive",
+                                    "pending",
+                                    "archived"
+                                ]
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.hier3.root.v1~"
+            "x.test12._.branch.v1~x.test12._.bad_leaf.v1~",
+            False,
+            "validate level 3 schema should fail",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_3LevelHierarchy_ConstraintCascade(
+    HttpRunner
+):
+    """OP#12 - Type Derivation: 3-level progressive constraint tightening"""
+    config = Config("OP#12 - 3-Level Constraint Cascade").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema with max 1024")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.cascade.message.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["msgId", "payload"],
+                "properties": {
+                    "msgId": {"type": "string"},
+                    "payload": {"type": "string", "maxLength": 1024}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register level 2 schema with max 512")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.cascade.message.v1~"
+                    "x.test12._.sms.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.cascade.message.v1~"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "payload": {
+                                "type": "string",
+                                "maxLength": 512
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.cascade.message.v1~x.test12._.sms.v1~",
+            True,
+            "validate level 2 schema",
+        ),
+        Step(
+            RunRequest("register level 3 schema with max 256")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.cascade.message.v1~"
+                    "x.test12._.sms.v1~x.test12._.short_sms.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.cascade.message.v1~"
+                            "x.test12._.sms.v1~"
+                        )
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "payload": {
+                                "type": "string",
+                                "maxLength": 256
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.cascade.message.v1~"
+            "x.test12._.sms.v1~x.test12._.short_sms.v1~",
+            True,
+            "validate level 3 schema",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_3LevelHierarchy_InvalidCascade(
+    HttpRunner
+):
+    """OP#12 - Type Derivation: 3-level where L3 exceeds L1 limit"""
+    config = Config("OP#12 - 3-Level Invalid Cascade").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema with max 128")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.badcascade.field.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["fieldId"],
+                "properties": {
+                    "fieldId": {"type": "string"},
+                    "data": {"type": "string", "maxLength": 128}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register level 2 schema with max 100")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.badcascade.field.v1~"
+                    "x.test12._.medium.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.badcascade.field.v1~"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "data": {"type": "string", "maxLength": 100}
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.badcascade.field.v1~"
+            "x.test12._.medium.v1~",
+            True,
+            "validate level 2 schema",
+        ),
+        Step(
+            RunRequest("register level 3 schema with max 256")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.badcascade.field.v1~"
+                    "x.test12._.medium.v1~x.test12._.bad_large.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.badcascade.field.v1~"
+                            "x.test12._.medium.v1~"
+                        )
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "data": {"type": "string", "maxLength": 256}
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.badcascade.field.v1~"
+            "x.test12._.medium.v1~x.test12._.bad_large.v1~",
+            False,
+            "validate level 3 schema should fail",
+        ),
+        Step(
+            RunRequest("validate level 3 schema should fail")
+            .post("/validate-entity")
+            .with_json({
+                "gts_id": (
+                    "gts.x.test12.badcascade.field.v1~"
+                    "x.test12._.medium.v1~x.test12._.bad_large.v1~"
+                )
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+            .assert_equal("body.ok", False)
+        ),
+    ]
+
+
+class TestCaseTestOp12_StringConstConflict(HttpRunner):
+    """OP#12 - L2 const "abc", L3 const "def" → must fail."""
+    config = Config("OP#12 - String Const Conflict").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_const_steps(
+        "strconst", "status", "string", "abc", "def", False)
+
+
+class TestCaseTestOp12_NumericConstConflict(HttpRunner):
+    """OP#12 - L2 const 42, L3 const 99 → must fail."""
+    config = Config("OP#12 - Numeric Const Conflict").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_const_steps(
+        "numconst", "value", "number", 42, 99, False)
+
+
+class TestCaseTestOp12_TypeChangeIntNumberInt(HttpRunner):
+    """OP#12 - 3-level: Base integer, L2 widens to number, L3 narrows
+    back to integer. L3 must fail because it narrows the type that L2
+    already widened (floats valid in L2 would be rejected by L3).
+    """
+    config = Config(
+        "OP#12 - Type Change int/number/int"
+    ).base_url(get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema with integer field")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.typechange.score.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["scoreId", "points"],
+                "properties": {
+                    "scoreId": {"type": "string"},
+                    "points": {"type": "integer"}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register L2 schema widening to number")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.typechange.score.v1~"
+                    "x.test12._.float_score.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.typechange.score.v1~"
+                        )
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "points": {"type": "number"}
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.typechange.score.v1~"
+            "x.test12._.float_score.v1~",
+            False,
+            "validate L2 schema should fail - widens type",
+        ),
+        Step(
+            RunRequest("register L3 schema narrowing back to integer")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.typechange.score.v1~"
+                    "x.test12._.float_score.v1~"
+                    "x.test12._.int_score.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.typechange.score.v1~"
+                            "x.test12._.float_score.v1~"
+                        )
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "points": {"type": "integer"}
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.typechange.score.v1~"
+            "x.test12._.float_score.v1~"
+            "x.test12._.int_score.v1~",
+            False,
+            "validate L3 schema should also fail",
+        ),
+    ]
+
+
+class TestCaseTestOp12_EnumReWidening(HttpRunner):
+    """OP#12 - L2 narrows enum [a,b], L3 re-widens [a,b,c] → fail."""
+    config = Config("OP#12 - Enum Re-Widening").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_loosening_steps(
+        "enumwide", "level", "string",
+        base_constraint=["admin", "editor", "viewer"],
+        l2_constraint=["admin", "editor"],
+        l3_constraint=["admin", "editor", "viewer"],
+        keyword="enum")
+
+
+class TestCaseTestOp12_MinLengthLoosening(HttpRunner):
+    """OP#12 - L2 tightens minLength 5, L3 loosens to 3 → fail."""
+    config = Config("OP#12 - MinLength Loosening").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_loosening_steps(
+        "minlen", "code", "string",
+        base_constraint=1, l2_constraint=5, l3_constraint=3,
+        keyword="minLength")
+
+
+class TestCaseTestOp12_TypeChangeStringToInt(HttpRunner):
+    """OP#12 - Base string, L2 changes to integer → must fail."""
+    config = Config("OP#12 - Type Change string to integer").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register("gts://gts.x.test12.typebreak.record.v1~", {
+            "type": "object",
+            "required": ["recordId", "label"],
+            "properties": {
+                "recordId": {"type": "string"},
+                "label": {"type": "string"},
+            },
+        }, "register base with string field"),
+        _register_derived(
+            ("gts://gts.x.test12.typebreak.record.v1~"
+             "x.test12._.bad_record.v1~"),
+            "gts://gts.x.test12.typebreak.record.v1~",
+            {"type": "object", "properties": {
+                "label": {"type": "integer"},
+            }},
+            "register L2 changing string to integer",
+        ),
+        _validate_type_schema(
+            ("gts.x.test12.typebreak.record.v1~"
+             "x.test12._.bad_record.v1~"),
+            False, "validate L2 should fail",
+        ),
+    ]
+
+
+class TestCaseTestOp12_BooleanConstConflict(HttpRunner):
+    """OP#12 - L2 const true, L3 const false → must fail."""
+    config = Config("OP#12 - Boolean Const Conflict").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_const_steps(
+        "boolconst", "enabled", "boolean", True, False, False)
+
+
+class TestCaseTestOp12_MaximumLoosening(HttpRunner):
+    """OP#12 - L2 tightens maximum 500, L3 loosens to 800 → fail."""
+    config = Config("OP#12 - Maximum Loosening").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_loosening_steps(
+        "maxloose", "count", "integer",
+        base_constraint=1000, l2_constraint=500, l3_constraint=800,
+        keyword="maximum", extra_prop={"minimum": 0})
+
+
+class TestCaseTestOp12_StringConstIdempotent(HttpRunner):
+    """OP#12 - L2 const "abc", L3 restates "abc" → must pass."""
+    config = Config("OP#12 - String Const Idempotent").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_const_steps(
+        "stridemp", "status", "string", "abc", "abc", True)
+
+
+class TestCaseTestOp12_NumericConstIdempotent(HttpRunner):
+    """OP#12 - L2 const 42, L3 restates 42 → must pass."""
+    config = Config("OP#12 - Numeric Const Idempotent").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_const_steps(
+        "numidemp", "value", "number", 42, 42, True)
+
+
+class TestCaseTestOp12_BooleanConstIdempotent(HttpRunner):
+    """OP#12 - L2 const true, L3 restates true → must pass."""
+    config = Config("OP#12 - Boolean Const Idempotent").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_const_steps(
+        "boolidemp", "active", "boolean", True, True, True)
+
+
+class TestCaseTestOp12_EnumIdenticalRestatement(HttpRunner):
+    """OP#12 - L2 narrows enum [r,w], L3 restates [r,w] → pass."""
+    config = Config("OP#12 - Enum Identical Restatement").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_loosening_steps(
+        "enumsame", "access", "string",
+        base_constraint=["read", "write", "admin"],
+        l2_constraint=["read", "write"],
+        l3_constraint=["read", "write"],
+        keyword="enum", expect_l3_ok=True)
+
+
+class TestCaseTestOp12_RequiredSubsetInOverlay(HttpRunner):
+    """OP#12 - L2 overlay lists subset of required → must pass
+    (allOf union preserves base required).
+    """
+    config = Config(
+        "OP#12 - Required Subset In Overlay (allOf union)"
+    ).base_url(get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register("gts://gts.x.test12.reqsub.contact.v1~", {
+            "type": "object",
+            "required": ["contactId", "name", "email"],
+            "properties": {
+                "contactId": {"type": "string"},
+                "name": {"type": "string"},
+                "email": {"type": "string", "format": "email"},
+            },
+        }, "register base with required fields"),
+        _register_derived(
+            ("gts://gts.x.test12.reqsub.contact.v1~"
+             "x.test12._.slim_contact.v1~"),
+            "gts://gts.x.test12.reqsub.contact.v1~",
+            {
+                "type": "object",
+                "required": ["contactId", "name"],
+                "properties": {
+                    "contactId": {"type": "string"},
+                    "name": {"type": "string"},
+                },
+            },
+            "register L2 with subset required",
+        ),
+        _validate_type_schema(
+            ("gts.x.test12.reqsub.contact.v1~"
+             "x.test12._.slim_contact.v1~"),
+            True, "validate L2 should pass",
+        ),
+    ]
+
+
+class TestCaseTestOp12_PatternConflict(HttpRunner):
+    """OP#12 - Base pattern ^[a-z]+$, L2 pattern ^[0-9]+$ → fail."""
+    config = Config("OP#12 - Pattern Conflict").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register("gts://gts.x.test12.pattern.code.v1~", {
+            "type": "object",
+            "required": ["codeId", "value"],
+            "properties": {
+                "codeId": {"type": "string"},
+                "value": {"type": "string", "pattern": "^[a-z]+$"},
+            },
+        }, "register base with alpha pattern"),
+        _register_derived(
+            ("gts://gts.x.test12.pattern.code.v1~"
+             "x.test12._.num_code.v1~"),
+            "gts://gts.x.test12.pattern.code.v1~",
+            {"type": "object", "properties": {
+                "value": {"type": "string", "pattern": "^[0-9]+$"},
+            }},
+            "register L2 with numeric pattern",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.pattern.code.v1~x.test12._.num_code.v1~",
+            False, "validate L2 should fail",
+        ),
+    ]
+
+
+class TestCaseTestOp12_MinItemsLoosening(HttpRunner):
+    """OP#12 - L2 tightens minItems 5, L3 loosens to 2 → fail."""
+    config = Config("OP#12 - MinItems Loosening").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_loosening_steps(
+        "minitems", "entries", "array",
+        base_constraint=1, l2_constraint=5, l3_constraint=2,
+        keyword="minItems", extra_prop={"items": {"type": "string"}})
+
+
+class TestCaseTestOp12_MinimumLoosening(HttpRunner):
+    """OP#12 - L2 tightens minimum 10, L3 loosens to 5 → fail."""
+    config = Config("OP#12 - Minimum Loosening").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_loosening_steps(
+        "minloose", "degrees", "integer",
+        base_constraint=0, l2_constraint=10, l3_constraint=5,
+        keyword="minimum")
+
+
+class TestCaseTestOp12_MaxLengthIdempotent(HttpRunner):
+    """OP#12 - L2 tightens maxLength 100, L3 restates 100 → pass."""
+    config = Config("OP#12 - MaxLength Idempotent").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_loosening_steps(
+        "mlidemp", "text", "string",
+        base_constraint=200, l2_constraint=100, l3_constraint=100,
+        keyword="maxLength", expect_l3_ok=True)
+
+
+class TestCaseTestOp12_ArrayTypeChange(HttpRunner):
+    """OP#12 - 3-level: Base has array of strings, L2 narrows items
+    to maxLength 50, L3 changes item type to integer.
+    L3 must fail because changing array item type breaks
+    compatibility with both L2 and base.
+    """
+    config = Config(
+        "OP#12 - Array Item Type Change"
+    ).base_url(get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema with string array")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.arrtype.tags.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["tagListId", "tags"],
+                "properties": {
+                    "tagListId": {"type": "string"},
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register L2 schema tightening string items")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.arrtype.tags.v1~"
+                    "x.test12._.short_tags.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.arrtype.tags.v1~"
+                        )
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "tags": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "maxLength": 50
+                                }
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.arrtype.tags.v1~"
+            "x.test12._.short_tags.v1~",
+            True,
+            "validate L2 schema",
+        ),
+        Step(
+            RunRequest("register L3 schema changing items to integer")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.arrtype.tags.v1~"
+                    "x.test12._.short_tags.v1~"
+                    "x.test12._.bad_tags.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.arrtype.tags.v1~"
+                            "x.test12._.short_tags.v1~"
+                        )
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "tags": {
+                                "type": "array",
+                                "items": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.arrtype.tags.v1~"
+            "x.test12._.short_tags.v1~"
+            "x.test12._.bad_tags.v1~",
+            False,
+            "validate L3 schema should fail",
+        ),
+    ]
+
+
+class TestCaseTestOp12_ConstraintDropMaxLength(HttpRunner):
+    """OP#12 - Derived drops maxLength → must fail."""
+    config = Config("OP#12 - Constraint Drop maxLength").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_2level_constraint_drop_steps(
+        "ml", "code", "string", "maxLength", 100)
+
+
+class TestCaseTestOp12_ConstraintDropMinimum(HttpRunner):
+    """OP#12 - Derived drops minimum → must fail."""
+    config = Config("OP#12 - Constraint Drop minimum").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_2level_constraint_drop_steps(
+        "min", "score", "number", "minimum", 0)
+
+
+class TestCaseTestOp12_ConstraintDropEnum(HttpRunner):
+    """OP#12 - Derived drops enum → must fail."""
+    config = Config("OP#12 - Constraint Drop enum").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_2level_constraint_drop_steps(
+        "enum", "status", "string", "enum", ["a", "b", "c"])
+
+
+class TestCaseTestOp12_ConstraintDropConst(HttpRunner):
+    """OP#12 - Derived drops const → must fail."""
+    config = Config("OP#12 - Constraint Drop const").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_2level_constraint_drop_steps(
+        "const", "version", "string", "const", "fixed")
+
+
+class TestCaseTestOp12_ConstraintDropPattern(HttpRunner):
+    """OP#12 - Derived drops pattern → must fail."""
+    config = Config("OP#12 - Constraint Drop pattern").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_2level_constraint_drop_steps(
+        "pat", "slug", "string", "pattern", "^[a-z]+$")
+
+
+class TestCaseTestOp12_ConstraintDropItems(HttpRunner):
+    """OP#12 - Derived drops items constraint → must fail."""
+    config = Config("OP#12 - Constraint Drop items").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_2level_constraint_drop_steps(
+        "items", "tags", "array", "items",
+        {"type": "string", "maxLength": 50})
+
+
+class TestCaseTestOp12_ConstraintDropMaximum(HttpRunner):
+    """OP#12 - Derived drops maximum → must fail."""
+    config = Config("OP#12 - Constraint Drop maximum").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_2level_constraint_drop_steps(
+        "max", "amount", "number", "maximum", 1000)
+
+
+class TestCaseTestOp12_ConstraintDropMinLength(HttpRunner):
+    """OP#12 - Derived drops minLength → must fail."""
+    config = Config("OP#12 - Constraint Drop minLength").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_2level_constraint_drop_steps(
+        "minl", "name", "string", "minLength", 5)
+
+
+class TestCaseTestOp12_ConstraintDropMinItems(HttpRunner):
+    """OP#12 - Derived drops minItems → must fail."""
+    config = Config("OP#12 - Constraint Drop minItems").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_2level_constraint_drop_steps(
+        "mni", "items", "array", "minItems", 1,
+        extra_base={"items": {"type": "string"}})
+
+
+class TestCaseTestOp12_AdditionalPropertiesTrueInOverlayStaysClosed(HttpRunner):
+    """OP#12 - Base AP false; derived overlay sets AP true → still closed, passes.
+
+    The derived schema is `allOf: [{$ref: closed_base}, {…, AP: true}]`.
+    Under JSON Schema draft-07, allOf is a conjunction: an instance must
+    validate against *every* branch. The base branch (AP:false over its
+    own `properties`) independently rejects any extra top-level key, and
+    the overlay's `additionalProperties: true` cannot override another
+    branch's constraint — allOf composes, it does not merge. The combined
+    schema therefore remains closed, so this is **not** loosening and OP#12
+    must accept it. Flagging it would require structural intent-detection
+    rather than effective-instance semantics.
+    """
+    config = Config("OP#12 - additionalProperties true in overlay stays closed").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register("gts://gts.x.test12.ap.loose.v1~", {
+            "type": "object",
+            "required": ["id"],
+            "properties": {"id": {"type": "string"}},
+            "additionalProperties": False,
+        }, "register closed base schema"),
+        _register_derived(
+            "gts://gts.x.test12.ap.loose.v1~x.test12._.opened.v1~",
+            "gts://gts.x.test12.ap.loose.v1~",
+            {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "additionalProperties": True,
+            },
+            "register derived with AP true in overlay",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.ap.loose.v1~x.test12._.opened.v1~",
+            True, "validate should pass - base branch still denies extras via allOf",
+        ),
+    ]
+
+
+class TestCaseTestOp12_AdditionalPropertiesOmittedInheritsClosedness(HttpRunner):
+    """OP#12 - Base AP false, derived omits AP → inherits closedness, passes.
+
+    The derived schema is `allOf: [{$ref: closed_base}, overlay]` and omits
+    `additionalProperties` at its own root. Per draft-07 § 6.5.6,
+    `additionalProperties` only inspects sibling `properties` at the same
+    level — but the base's `additionalProperties: false` still applies to
+    the same instance through the `$ref` half of the allOf composition.
+    The closedness is therefore *inherited*; omitting the keyword is not
+    loosening, and OP#12 must accept this shape. (A derived schema that
+    wants to genuinely open up cannot do so via allOf at all — see
+    TestCaseTestOp12_AdditionalPropertiesTrueInOverlayStaysClosed.)
+    """
+    config = Config("OP#12 - additionalProperties omitted inherits closedness").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register("gts://gts.x.test12.ap.omit.v1~", {
+            "type": "object",
+            "required": ["id"],
+            "properties": {"id": {"type": "string"}},
+            "additionalProperties": False,
+        }, "register closed base schema"),
+        _register_derived(
+            "gts://gts.x.test12.ap.omit.v1~x.test12._.no_ap.v1~",
+            "gts://gts.x.test12.ap.omit.v1~",
+            {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+            },
+            "register derived omitting AP",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.ap.omit.v1~x.test12._.no_ap.v1~",
+            True, "validate should pass - closedness inherited via $ref/allOf",
+        ),
+    ]
+
+
+class TestCaseTestOp12_RequiredDroppedViaEmptyRequired(HttpRunner):
+    """OP#12 - Derived has required:[] in overlay → must pass
+    (allOf union preserves base required).
+    """
+    config = Config("OP#12 - Required Dropped Via Empty List").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register("gts://gts.x.test12.req.drop.v1~", {
+            "type": "object",
+            "required": ["id", "name"],
+            "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string"},
+            },
+        }, "register base with required fields"),
+        _register_derived(
+            "gts://gts.x.test12.req.drop.v1~x.test12._.empty_req.v1~",
+            "gts://gts.x.test12.req.drop.v1~",
+            {
+                "type": "object",
+                "required": [],
+                "properties": {"extra": {"type": "string"}},
+            },
+            "register derived with empty required",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.req.drop.v1~x.test12._.empty_req.v1~",
+            True, "validate should pass - empty overlay is ok",
+        ),
+    ]
+
+
+class TestCaseTestOp12_RequiredFieldRemoval(HttpRunner):
+    """OP#12 - Derived lists subset of required in overlay → must
+    pass (allOf union keeps all base required).
+    """
+    config = Config("OP#12 - Required Field Removal").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register("gts://gts.x.test12.req.rm.v1~", {
+            "type": "object",
+            "required": ["id", "name", "email"],
+            "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string"},
+                "email": {"type": "string", "format": "email"},
+            },
+        }, "register base schema"),
+        _register_derived(
+            "gts://gts.x.test12.req.rm.v1~x.test12._.less_req.v1~",
+            "gts://gts.x.test12.req.rm.v1~",
+            {
+                "type": "object",
+                "required": ["id", "name"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "name": {"type": "string"},
+                },
+            },
+            "register derived removing required email",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.req.rm.v1~x.test12._.less_req.v1~",
+            True, "validate should pass - allOf union keeps all",
+        ),
+    ]
+
+
+class TestCaseTestOp12_AllOfIntersectionNotOverride(HttpRunner):
+    """OP#12 - 3-level: L2 maxLength 100, L3 overlay maxLength 150.
+    L3 must fail because overlay loosens L2's constraint.
+    """
+    config = Config("OP#12 - allOf Intersection Not Override").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = _make_3level_loosening_steps(
+        "allof_inter", "desc", "string",
+        base_constraint=200, l2_constraint=100, l3_constraint=150,
+        keyword="maxLength",
+    )
+
+
+class TestCaseTestOp12_EnumValueReplacement(HttpRunner):
+    """OP#12 - 2-level: Base enum [a,b], derived changes to [a,d].
+    Must fail because 'd' is not in the base enum and 'b' is removed.
+    """
+    config = Config("OP#12 - Enum Value Replacement").base_url(
+        get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register("gts://gts.x.test12.enumrepl.item.v1~", {
+            "type": "object",
+            "required": ["itemId", "category"],
+            "properties": {
+                "itemId": {"type": "string"},
+                "category": {
+                    "type": "string",
+                    "enum": ["a", "b"],
+                },
+            },
+        }, "register base with enum [a, b]"),
+        _register_derived(
+            ("gts://gts.x.test12.enumrepl.item.v1~"
+             "x.test12._.replaced.v1~"),
+            "gts://gts.x.test12.enumrepl.item.v1~",
+            {"type": "object", "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["a", "d"],
+                },
+            }},
+            "register derived with enum [a, d]",
+        ),
+        _validate_type_schema(
+            ("gts.x.test12.enumrepl.item.v1~"
+             "x.test12._.replaced.v1~"),
+            False,
+            "validate should fail - enum value replaced",
+        ),
+    ]
+
+
+class TestCaseTestOp12_RequiredPropertyGainsNullability(HttpRunner):
+    """OP#12 - 2-level: Base has required string property, derived
+    widens its type to ["string", "null"]. Must fail because a
+    required property that was non-nullable in the base cannot
+    become nullable in the derived schema.
+    """
+    config = Config(
+        "OP#12 - Required Property Gains Nullability"
+    ).base_url(get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register("gts://gts.x.test12.nullable.rec.v1~", {
+            "type": "object",
+            "required": ["recId", "name"],
+            "properties": {
+                "recId": {"type": "string"},
+                "name": {"type": "string"},
+            },
+        }, "register base with required non-nullable name"),
+        _register_derived(
+            ("gts://gts.x.test12.nullable.rec.v1~"
+             "x.test12._.null_name.v1~"),
+            "gts://gts.x.test12.nullable.rec.v1~",
+            {"type": "object", "properties": {
+                "name": {"type": ["string", "null"]},
+            }},
+            "register derived allowing null for name",
+        ),
+        _validate_type_schema(
+            ("gts.x.test12.nullable.rec.v1~"
+             "x.test12._.null_name.v1~"),
+            False,
+            "validate should fail - nullability added",
+        ),
+    ]
+
+
+class TestCaseTestOp12_PrimitiveTypeWidening(HttpRunner):
+    """OP#12 - 2-level: Base has "type": "string", derived widens
+    to "type": ["string", "number"]. Must fail because the derived
+    schema accepts values (numbers) that the base would reject.
+    """
+    config = Config(
+        "OP#12 - Primitive Type Widening"
+    ).base_url(get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register("gts://gts.x.test12.typewiden.field.v1~", {
+            "type": "object",
+            "required": ["fieldId", "value"],
+            "properties": {
+                "fieldId": {"type": "string"},
+                "value": {"type": "string"},
+            },
+        }, "register base with string-only value"),
+        _register_derived(
+            ("gts://gts.x.test12.typewiden.field.v1~"
+             "x.test12._.wider.v1~"),
+            "gts://gts.x.test12.typewiden.field.v1~",
+            {"type": "object", "properties": {
+                "value": {"type": ["string", "number"]},
+            }},
+            "register derived widening to [string, number]",
+        ),
+        _validate_type_schema(
+            ("gts.x.test12.typewiden.field.v1~"
+             "x.test12._.wider.v1~"),
+            False,
+            "validate should fail - type widened",
+        ),
+    ]
+
+
+class TestCaseTestOp12_ConstViolatesMinimum(HttpRunner):
+    """OP#12 - 2-level: Base has integer with minimum 42, derived
+    sets const 32. Must fail because const 32 < minimum 42 — the
+    derived const value violates the base constraint.
+    """
+    config = Config(
+        "OP#12 - Const Violates Minimum"
+    ).base_url(get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register("gts://gts.x.test12.constmin.val.v1~", {
+            "type": "object",
+            "required": ["valId", "score"],
+            "properties": {
+                "valId": {"type": "string"},
+                "score": {
+                    "type": "integer",
+                    "minimum": 42,
+                },
+            },
+        }, "register base with minimum 42"),
+        _register_derived(
+            ("gts://gts.x.test12.constmin.val.v1~"
+             "x.test12._.bad_const.v1~"),
+            "gts://gts.x.test12.constmin.val.v1~",
+            {"type": "object", "properties": {
+                "score": {
+                    "type": "integer",
+                    "const": 32,
+                },
+            }},
+            "register derived with const 32",
+        ),
+        _validate_type_schema(
+            ("gts.x.test12.constmin.val.v1~"
+             "x.test12._.bad_const.v1~"),
+            False,
+            "validate should fail - const 32 < minimum 42",
+        ),
+    ]
+
+
+class TestCaseOp12_DerivedSchemaRefTargetMissing(HttpRunner):
+    """Explicit validation must resolve references in a derived schema."""
+
+    config = Config("OP#12 - Derived schema reference target missing").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.refmissing.base.v1~",
+            {"type": "object", "properties": {"id": {"type": "string"}}},
+            "register derivation base",
+        ),
+        _register(
+            (
+                "gts://gts.x.test12.refmissing.base.v1~"
+                "x.test12._.host.v1~"
+            ),
+            {
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.refmissing.target.v1~"},
+                ],
+            },
+            "register derived schema referencing missing type",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.refmissing.base.v1~x.test12._.host.v1~",
+            False,
+            "validate should fail - GTS reference target is missing",
+        ),
+    ]
+
+
+class TestCaseOp12_DerivedSchemaRefTargetInvalid(HttpRunner):
+    """Explicit validation must recursively validate referenced GTS types."""
+
+    config = Config("OP#12 - Derived schema reference target invalid").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.refinvalid.target.v1~",
+            {
+                "type": "object",
+                "x-gts-traits-schema": {
+                    "type": "object",
+                    "properties": {"retention": {"type": "string"}},
+                    "required": ["retention"],
+                },
+                "properties": {"id": {"type": "string"}},
+            },
+            "register invalid referenced type with unresolved trait",
+        ),
+        _register(
+            "gts://gts.x.test12.refinvalid.host.v1~",
+            {"type": "object", "properties": {"id": {"type": "string"}}},
+            "register valid derivation base",
+        ),
+        _register(
+            "gts://gts.x.test12.refinvalid.host.v1~x.test12._.derived.v1~",
+            {
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.refinvalid.target.v1~"},
+                ],
+            },
+            "register derived schema referencing invalid type",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.refinvalid.target.v1~",
+            False,
+            "validate referenced type - required retention is unresolved",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.refinvalid.host.v1~x.test12._.derived.v1~",
+            False,
+            "validate derived - referenced type is invalid",
+        ),
+    ]
+
+
+class TestCaseOp12_SchemaRefTargetHasInvalidAncestor(HttpRunner):
+    """Transitive $ref validation follows the target's ancestor chain."""
+
+    config = Config("OP#12 - Referenced type has invalid ancestor").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.refchain.target.v1~",
+            {
+                "type": "object",
+                "x-gts-traits-schema": {
+                    "type": "object",
+                    "properties": {"retention": {"type": "string"}},
+                    "required": ["retention"],
+                },
+                "properties": {"id": {"type": "string"}},
+            },
+            "register invalid target base with unresolved trait",
+        ),
+        _register_derived(
+            "gts://gts.x.test12.refchain.target.v1~x.test12._.leaf.v1~",
+            "gts://gts.x.test12.refchain.target.v1~",
+            {
+                "type": "object",
+                "x-gts-traits": {"retention": "P30D"},
+            },
+            "register locally complete target descendant",
+        ),
+        _register(
+            "gts://gts.x.test12.refchain.host.v1~",
+            {
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.refchain.target.v1~"
+                            "x.test12._.leaf.v1~"
+                        )
+                    },
+                ],
+            },
+            "register host referencing target descendant",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.refchain.target.v1~x.test12._.leaf.v1~",
+            False,
+            "validate target descendant - its ancestor is invalid",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.refchain.host.v1~",
+            False,
+            "validate host - referenced target has invalid ancestor",
+        ),
+    ]
+
+
+class TestCaseOp12_DerivedSchemaRefPartialTargetMissing(HttpRunner):
+    """Every segment of a referenced GTS type chain must exist."""
+
+    config = Config("OP#12 - Partial reference target missing").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.refpartial.target.v1~",
+            {"type": "object", "properties": {"id": {"type": "string"}}},
+            "register first segment of referenced type chain",
+        ),
+        _register(
+            "gts://gts.x.test12.refpartial.host.v1~",
+            {"type": "object", "properties": {"id": {"type": "string"}}},
+            "register derivation base",
+        ),
+        _register(
+            "gts://gts.x.test12.refpartial.host.v1~x.test12._.derived.v1~",
+            {
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.refpartial.target.v1~"
+                            "x.test12._.missing.v1~"
+                        )
+                    },
+                ],
+            },
+            "register derived schema referencing missing second segment",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.refpartial.host.v1~x.test12._.derived.v1~",
+            False,
+            "validate should fail - second reference segment is missing",
+        ),
+    ]
+
+
+class TestCaseValidateEntity_ValidInstance(HttpRunner):
+    """Validate Entity: Valid instance through unified endpoint"""
+    config = Config("Validate Entity - Valid Instance").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base event schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.testentity.events.type.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["id", "type", "occurredAt"],
+                "properties": {
+                    "type": {"type": "string"},
+                    "id": {"type": "string"},
+                    "occurredAt": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "payload": {"type": "object"}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register derived event schema")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.testentity.events.type.v1~"
+                    "x.testentity.events.user_created.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.testentity.events.type.v1~"},
+                    {
+                        "type": "object",
+                        "required": ["payload"],
+                        "properties": {
+                            "type": {
+                                "const": (
+                                    "gts.x.testentity.events.type.v1~"
+                                    "x.testentity.events.user_created.v1~"
+                                )
+                            },
+                            "payload": {
+                                "type": "object",
+                                "required": ["userId", "email"],
+                                "properties": {
+                                    "userId": {
+                                        "type": "string",
+                                        "format": "uuid"
+                                    },
+                                    "email": {
+                                        "type": "string",
+                                        "format": "email"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register valid instance")
+            .post("/entities")
+            .with_json({
+                "type": (
+                    "gts.x.testentity.events.type.v1~"
+                    "x.testentity.events.user_created.v1~"
+                ),
+                "id": (
+                    "gts.x.testentity.events.type.v1~"
+                    "x.testentity.events.user_created.v1~"
+                    "x.testentity._.event1.v1"
+                ),
+                "occurredAt": "2025-09-20T18:35:00Z",
+                "payload": {
+                    "userId": "550e8400-e29b-41d4-a716-446655440000",
+                    "email": "user@example.com"
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("validate instance via unified endpoint")
+            .post("/validate-entity")
+            .with_json({
+                "entity_id": (
+                    "gts.x.testentity.events.type.v1~"
+                    "x.testentity.events.user_created.v1~"
+                    "x.testentity._.event1.v1"
+                )
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+            .assert_equal("body.ok", True)
+            .assert_equal("body.entity_type", "instance")
+        ),
+    ]
+
+
+class TestCaseValidateEntity_InvalidInstance(HttpRunner):
+    """Validate Entity: Invalid instance through unified endpoint"""
+    config = Config("Validate Entity - Invalid Instance").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.testentity2.data.record.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["recordId", "value"],
+                "properties": {
+                    "recordId": {"type": "string"},
+                    "value": {"type": "number", "minimum": 0}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register invalid instance missing required field")
+            .post("/entities")
+            .with_json({
+                "type": "gts.x.testentity2.data.record.v1~",
+                "id": (
+                    "gts.x.testentity2.data.record.v1~"
+                    "x.testentity2._.record1.v1"
+                ),
+                "recordId": "REC-001"
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("validate invalid instance should fail")
+            .post("/validate-entity")
+            .with_json({
+                "entity_id": (
+                    "gts.x.testentity2.data.record.v1~"
+                    "x.testentity2._.record1.v1"
+                )
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+            .assert_equal("body.ok", False)
+            .assert_equal("body.entity_type", "instance")
+        ),
+    ]
+
+
+class TestCaseValidateEntity_ValidSchema(HttpRunner):
+    """Validate Entity: Valid derived schema through unified endpoint"""
+    config = Config("Validate Entity - Valid Schema").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.testentity3.core.entity.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["entityId"],
+                "properties": {
+                    "entityId": {"type": "string", "format": "uuid"},
+                    "description": {"type": "string", "maxLength": 200}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register valid derived schema")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.testentity3.core.entity.v1~"
+                    "x.testentity3._.document.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.testentity3.core.entity.v1~"},
+                    {
+                        "type": "object",
+                        "required": ["title"],
+                        "properties": {
+                            "title": {"type": "string", "maxLength": 100},
+                            "description": {
+                                "type": "string",
+                                "maxLength": 150
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("validate schema via unified endpoint")
+            .post("/validate-entity")
+            .with_json({
+                "entity_id": (
+                    "gts.x.testentity3.core.entity.v1~"
+                    "x.testentity3._.document.v1~"
+                )
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+            .assert_equal("body.ok", True)
+            .assert_equal("body.entity_type", "schema")
+        ),
+    ]
+
+
+class TestCaseValidateEntity_InvalidSchema(HttpRunner):
+    """Validate Entity: Invalid derived schema through unified endpoint"""
+    config = Config("Validate Entity - Invalid Schema").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.testentity4.base.item.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["itemId"],
+                "properties": {
+                    "itemId": {"type": "string"},
+                    "size": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100
+                    }
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register invalid derived schema loosening constraints")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.testentity4.base.item.v1~"
+                    "x.testentity4._.bad_item.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.testentity4.base.item.v1~"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "size": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 200
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("validate schema should fail")
+            .post("/validate-entity")
+            .with_json({
+                "entity_id": (
+                    "gts.x.testentity4.base.item.v1~"
+                    "x.testentity4._.bad_item.v1~"
+                )
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+            .assert_equal("body.ok", False)
+            .assert_equal("body.entity_type", "schema")
+        ),
+    ]
+
+
+class TestCaseValidateEntity_3LevelSchemaHierarchy(HttpRunner):
+    """Validate Entity: 3-level schema hierarchy validation"""
+    config = Config("Validate Entity - 3-Level Schema").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register level 1 base schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.testentity5.base.message.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["msgId"],
+                "properties": {
+                    "msgId": {"type": "string"},
+                    "content": {"type": "string", "maxLength": 1000}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register level 2 schema")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.testentity5.base.message.v1~"
+                    "x.testentity5._.email.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.testentity5.base.message.v1~"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "maxLength": 500}
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("validate level 2 schema")
+            .post("/validate-entity")
+            .with_json({
+                "entity_id": (
+                    "gts.x.testentity5.base.message.v1~"
+                    "x.testentity5._.email.v1~"
+                )
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+            .assert_equal("body.ok", True)
+            .assert_equal("body.entity_type", "schema")
+        ),
+        Step(
+            RunRequest("register level 3 schema")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.testentity5.base.message.v1~"
+                    "x.testentity5._.email.v1~x.testentity5._.notification.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.testentity5.base.message.v1~"
+                            "x.testentity5._.email.v1~"
+                        )
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "maxLength": 200}
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("validate level 3 schema")
+            .post("/validate-entity")
+            .with_json({
+                "entity_id": (
+                    "gts.x.testentity5.base.message.v1~"
+                    "x.testentity5._.email.v1~x.testentity5._.notification.v1~"
+                )
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+            .assert_equal("body.ok", True)
+            .assert_equal("body.entity_type", "schema")
+        ),
+    ]
+
+
+class TestCaseValidateEntity_MixedInstanceAndSchema(HttpRunner):
+    """Validate Entity: Test both instance and schema in same test"""
+    config = Config(
+        "Validate Entity - Mixed Instance and Schema"
+    ).base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.testentity6.product.base.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["productId", "name"],
+                "properties": {
+                    "productId": {"type": "string"},
+                    "name": {"type": "string"},
+                    "price": {"type": "number", "minimum": 0}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register derived schema")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.testentity6.product.base.v1~"
+                    "x.testentity6._.digital.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.testentity6.product.base.v1~"},
+                    {
+                        "type": "object",
+                        "required": ["downloadUrl"],
+                        "properties": {
+                            "downloadUrl": {
+                                "type": "string",
+                                "format": "uri"
+                            }
+                        }
+                    }
+                ]
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("validate derived schema")
+            .post("/validate-entity")
+            .with_json({
+                "entity_id": (
+                    "gts.x.testentity6.product.base.v1~"
+                    "x.testentity6._.digital.v1~"
+                )
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+            .assert_equal("body.ok", True)
+            .assert_equal("body.entity_type", "schema")
+        ),
+        Step(
+            RunRequest("register instance of derived schema")
+            .post("/entities")
+            .with_json({
+                "type": (
+                    "gts.x.testentity6.product.base.v1~"
+                    "x.testentity6._.digital.v1~"
+                ),
+                "id": (
+                    "gts.x.testentity6.product.base.v1~"
+                    "x.testentity6._.digital.v1~x.testentity6._.prod1.v1"
+                ),
+                "productId": "PROD-001",
+                "name": "eBook",
+                "price": 9.99,
+                "downloadUrl": "https://example.com/download/ebook"
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("validate instance")
+            .post("/validate-entity")
+            .with_json({
+                "entity_id": (
+                    "gts.x.testentity6.product.base.v1~"
+                    "x.testentity6._.digital.v1~x.testentity6._.prod1.v1"
+                )
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+            .assert_equal("body.ok", True)
+            .assert_equal("body.entity_type", "instance")
+        ),
+    ]
+
+
+class TestCaseValidateEntity_NotFound(HttpRunner):
+    """Validate Entity: Non-existent entity"""
+    config = Config("Validate Entity - Not Found").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("validate non-existent entity")
+            .post("/validate-entity")
+            .with_json({
+                "entity_id": "gts.x.nonexistent.entity.type.v1~"
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+            .assert_equal("body.ok", False)
+        ),
+    ]
+
+
+class TestCaseValidateEntity_BaseSchemaNoParent(HttpRunner):
+    """Validate Entity: Base schema with no parent (always valid)"""
+    config = Config(
+        "Validate Entity - Base Schema No Parent"
+    ).base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register base schema without parent")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.testentity7.standalone.schema.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string"}
+                }
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("validate base schema should succeed")
+            .post("/validate-entity")
+            .with_json({
+                "entity_id": "gts.x.testentity7.standalone.schema.v1~"
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+            .assert_equal("body.ok", True)
+            .assert_equal("body.entity_type", "schema")
+        ),
+    ]
+
+
+class TestCaseOp12_CyclingRef_SelfReference(HttpRunner):
+    """OP#12 - Cycling ref: schema references itself"""
+    config = Config("OP#12 - Self-Referencing Ref").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.cycle.self.v1~",
+            {
+                "type": "object",
+                "required": ["id"],
+                "properties": {"id": {"type": "string"}},
+            },
+            "register base schema",
+        ),
+        _register_derived(
+            (
+                "gts://gts.x.test12.cycle.self.v1~"
+                "x.test12._.self_ref.v1~"
+            ),
+            "gts://gts.x.test12.cycle.self.v1~",
+            {
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.cycle.self.v1~"
+                            "x.test12._.self_ref.v1~"
+                        ),
+                    },
+                ],
+            },
+            "register derived that refs itself",
+        ),
+        _validate_type_schema(
+            (
+                "gts.x.test12.cycle.self.v1~"
+                "x.test12._.self_ref.v1~"
+            ),
+            False,
+            "validate should fail - self-referencing cycle",
+        ),
+    ]
+
+
+class TestCaseOp12_CyclingRef_TwoNodeCycle(HttpRunner):
+    """OP#12 - Cycling ref: A refs B, B refs A"""
+    config = Config("OP#12 - Two-Node Ref Cycle").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.cycle2.base.v1~",
+            {
+                "type": "object",
+                "required": ["id"],
+                "properties": {"id": {"type": "string"}},
+            },
+            "register root base schema",
+        ),
+        _register_derived(
+            (
+                "gts://gts.x.test12.cycle2.base.v1~"
+                "x.test12._.node_a.v1~"
+            ),
+            "gts://gts.x.test12.cycle2.base.v1~",
+            {
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.cycle2.base.v1~"
+                            "x.test12._.node_b.v1~"
+                        ),
+                    },
+                ],
+            },
+            "register node A referencing node B",
+        ),
+        _register_derived(
+            (
+                "gts://gts.x.test12.cycle2.base.v1~"
+                "x.test12._.node_b.v1~"
+            ),
+            "gts://gts.x.test12.cycle2.base.v1~",
+            {
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.cycle2.base.v1~"
+                            "x.test12._.node_a.v1~"
+                        ),
+                    },
+                ],
+            },
+            "register node B referencing node A",
+        ),
+        _validate_type_schema(
+            (
+                "gts.x.test12.cycle2.base.v1~"
+                "x.test12._.node_a.v1~"
+            ),
+            False,
+            "validate node A should fail - two-node cycle",
+        ),
+        _validate_type_schema(
+            (
+                "gts.x.test12.cycle2.base.v1~"
+                "x.test12._.node_b.v1~"
+            ),
+            False,
+            "validate node B should fail - two-node cycle",
+        ),
+    ]
+
+
+class TestCaseOp12_CyclingRef_ThreeNodeCycle(HttpRunner):
+    """OP#12 - Cycling ref: A -> B -> C -> A"""
+    config = Config("OP#12 - Three-Node Ref Cycle").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.cycle3.base.v1~",
+            {
+                "type": "object",
+                "required": ["id"],
+                "properties": {"id": {"type": "string"}},
+            },
+            "register root base schema",
+        ),
+        _register_derived(
+            (
+                "gts://gts.x.test12.cycle3.base.v1~"
+                "x.test12._.node_a.v1~"
+            ),
+            "gts://gts.x.test12.cycle3.base.v1~",
+            {
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.cycle3.base.v1~"
+                            "x.test12._.node_b.v1~"
+                        ),
+                    },
+                ],
+            },
+            "register node A referencing node B",
+        ),
+        _register_derived(
+            (
+                "gts://gts.x.test12.cycle3.base.v1~"
+                "x.test12._.node_b.v1~"
+            ),
+            "gts://gts.x.test12.cycle3.base.v1~",
+            {
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.cycle3.base.v1~"
+                            "x.test12._.node_c.v1~"
+                        ),
+                    },
+                ],
+            },
+            "register node B referencing node C",
+        ),
+        _register_derived(
+            (
+                "gts://gts.x.test12.cycle3.base.v1~"
+                "x.test12._.node_c.v1~"
+            ),
+            "gts://gts.x.test12.cycle3.base.v1~",
+            {
+                "type": "object",
+                "allOf": [
+                    {
+                        "$$ref": (
+                            "gts://gts.x.test12.cycle3.base.v1~"
+                            "x.test12._.node_a.v1~"
+                        ),
+                    },
+                ],
+            },
+            "register node C referencing node A",
+        ),
+        _validate_type_schema(
+            (
+                "gts.x.test12.cycle3.base.v1~"
+                "x.test12._.node_a.v1~"
+            ),
+            False,
+            "validate node A should fail - three-node cycle",
+        ),
+        _validate_type_schema(
+            (
+                "gts.x.test12.cycle3.base.v1~"
+                "x.test12._.node_b.v1~"
+            ),
+            False,
+            "validate node B should fail - three-node cycle",
+        ),
+        _validate_type_schema(
+            (
+                "gts.x.test12.cycle3.base.v1~"
+                "x.test12._.node_c.v1~"
+            ),
+            False,
+            "validate node C should fail - three-node cycle",
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# x-gts-final tests (OP#12 extension — final types cannot be inherited)
+# ---------------------------------------------------------------------------
+
+
+class TestCaseOp12_FinalBase_RejectDerived(HttpRunner):
+    """OP#12 / x-gts-final: Derived schema from a final base MUST fail validation.
+
+    Base type declares x-gts-final: true. A derived schema referencing it
+    via allOf/$ref MUST be rejected by /validate-type-schema.
+    """
+
+    config = Config("OP#12 x-gts-final: reject derived from final base").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.final.base.v1~",
+            {
+                "type": "object",
+                "x-gts-final": True,
+                "properties": {
+                    "name": {"type": "string"},
+                },
+            },
+            "register final base schema",
+        ),
+        _register_derived(
+            "gts://gts.x.test12.final.base.v1~x.test12._.derived.v1~",
+            "gts://gts.x.test12.final.base.v1~",
+            {
+                "type": "object",
+                "properties": {
+                    "extra": {"type": "string"},
+                },
+            },
+            "register derived from final base",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.final.base.v1~x.test12._.derived.v1~",
+            False,
+            "validate derived from final base should fail",
+        ),
+    ]
+
+
+class TestCaseOp12_FinalMidChain(HttpRunner):
+    """OP#12 / x-gts-final: Mid-chain final type blocks further derivation.
+
+    Chain: A~ -> B~(final) -> C~. Validating C~ MUST fail because B~ is final.
+    """
+
+    config = Config("OP#12 x-gts-final: mid-chain final blocks derivation").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.finalmid.base.v1~",
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                },
+            },
+            "register base A",
+        ),
+        _register_derived(
+            "gts://gts.x.test12.finalmid.base.v1~x.test12._.mid.v1~",
+            "gts://gts.x.test12.finalmid.base.v1~",
+            {
+                "type": "object",
+                "properties": {
+                    "midField": {"type": "string"},
+                },
+            },
+            "register mid B (final)",
+            top_level={"x-gts-final": True},
+        ),
+        _register_derived(
+            "gts://gts.x.test12.finalmid.base.v1~x.test12._.mid.v1~x.test12._.leaf.v1~",
+            "gts://gts.x.test12.finalmid.base.v1~x.test12._.mid.v1~",
+            {
+                "type": "object",
+                "properties": {
+                    "leafField": {"type": "string"},
+                },
+            },
+            "register leaf C from final B",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.finalmid.base.v1~x.test12._.mid.v1~x.test12._.leaf.v1~",
+            False,
+            "validate C should fail - B is final",
+        ),
+    ]
+
+
+class TestCaseOp12_FinalSiblingUnaffected(HttpRunner):
+    """OP#12 / x-gts-final: Sibling of a final type can still derive from shared base.
+
+    A~ -> B~(final) and A~ -> C~. C~ is valid because A~ is not final.
+    """
+
+    config = Config("OP#12 x-gts-final: sibling of final is unaffected").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.finalsib.base.v1~",
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                },
+            },
+            "register base A",
+        ),
+        _register_derived(
+            "gts://gts.x.test12.finalsib.base.v1~x.test12._.final_b.v1~",
+            "gts://gts.x.test12.finalsib.base.v1~",
+            {
+                "type": "object",
+            },
+            "register B (final) from A",
+            top_level={"x-gts-final": True},
+        ),
+        _register_derived(
+            "gts://gts.x.test12.finalsib.base.v1~x.test12._.sibling_c.v1~",
+            "gts://gts.x.test12.finalsib.base.v1~",
+            {
+                "type": "object",
+                "properties": {
+                    "extra": {"type": "string"},
+                },
+            },
+            "register C (sibling) from A",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.finalsib.base.v1~x.test12._.sibling_c.v1~",
+            True,
+            "validate C should pass - A is not final",
+        ),
+    ]
+
+
+class TestCaseOp12_FinalBase_SelfValidationPasses(HttpRunner):
+    """OP#12 / x-gts-final: A final base type itself MUST pass /validate-type-schema.
+
+    The final modifier restricts derivation, not the type's own validity.
+    """
+
+    config = Config("OP#12 x-gts-final: final base self-validation passes").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.finalself.base.v1~",
+            {
+                "type": "object",
+                "x-gts-final": True,
+                "properties": {
+                    "name": {"type": "string"},
+                },
+            },
+            "register final base schema",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.finalself.base.v1~",
+            True,
+            "validate final base itself should pass",
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# ADR-0001: derivation form
+#
+# GTS is a JSON Schema extension, dialect-agnostic (not a formal JSON Schema
+# Dialect — it ships no dedicated $schema URI or meta-schema). The dialect of
+# any concrete Type Schema is what its own $schema declares (Draft-07 is the
+# example baseline; Draft 2019-09 and 2020-12 are equally supported).
+#
+# OP#12 compatibility applies to derived schemas regardless of whether they
+# use allOf + $ref or re-declare parent fields directly. x-gts-final is
+# enforced from the chained $id alone, not from body shape.
+# ---------------------------------------------------------------------------
+
+
+class TestCaseOp12_Redeclared_CompatiblePasses(HttpRunner):
+    """ADR-0001: derived schema without allOf, re-declaring parent fields.
+
+    Compatible re-declaration plus an added optional field. Passes OP#12.
+    """
+
+    config = Config("OP#12 ADR-0001: redeclared compatible passes").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.redcmp.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId", "name"],
+                "properties": {
+                    "userId": {"type": "string", "format": "uuid"},
+                    "name": {"type": "string", "maxLength": 100},
+                },
+            },
+            "register base user",
+        ),
+        _register_derived_redeclared(
+            "gts://gts.x.test12.redcmp.user.v1~x.test12._.premium.v1~",
+            "gts://gts.x.test12.redcmp.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId", "name"],
+                "properties": {
+                    "userId": {"type": "string", "format": "uuid"},
+                    "name": {"type": "string", "maxLength": 100},
+                    "tier": {"type": "string"},
+                },
+            },
+            "register derived without allOf",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.redcmp.user.v1~x.test12._.premium.v1~",
+            True,
+            "validate redeclared derived - compatible",
+        ),
+    ]
+
+
+class TestCaseOp12_Redeclared_TypeTighteningPasses(HttpRunner):
+    """ADR-0001: redeclared derived narrows email format. Valid OP#12 tightening."""
+
+    config = Config("OP#12 ADR-0001: redeclared tightening passes").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.redtight.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId", "contact"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "contact": {"type": "string"},
+                },
+            },
+            "register base user",
+        ),
+        _register_derived_redeclared(
+            "gts://gts.x.test12.redtight.user.v1~x.test12._.emailed.v1~",
+            "gts://gts.x.test12.redtight.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId", "contact"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "contact": {"type": "string", "format": "email"},
+                },
+            },
+            "register derived - tightens contact to format:email",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.redtight.user.v1~x.test12._.emailed.v1~",
+            True,
+            "validate redeclared derived - tightening allowed",
+        ),
+    ]
+
+
+class TestCaseOp12_Redeclared_ConstraintViolationFails(HttpRunner):
+    """ADR-0001: redeclared derived loosens maxLength. Must fail OP#12."""
+
+    config = Config("OP#12 ADR-0001: redeclared loosening fails").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.redloose.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId", "name"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "name": {"type": "string", "maxLength": 64},
+                },
+            },
+            "register base with name maxLength=64",
+        ),
+        _register_derived_redeclared(
+            "gts://gts.x.test12.redloose.user.v1~x.test12._.wider.v1~",
+            "gts://gts.x.test12.redloose.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId", "name"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "name": {"type": "string", "maxLength": 256},
+                },
+            },
+            "register derived loosens name maxLength to 256",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.redloose.user.v1~x.test12._.wider.v1~",
+            False,
+            "validate redeclared derived - loosening rejected",
+        ),
+    ]
+
+
+class TestCaseOp12_Redeclared_DropsParentRequiredFails(HttpRunner):
+    """ADR-0001: redeclared derived omits parent's required field. Must fail OP#12."""
+
+    config = Config("OP#12 ADR-0001: redeclared drops required").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.redreq.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId", "email"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "email": {"type": "string"},
+                },
+            },
+            "register base requiring userId and email",
+        ),
+        _register_derived_redeclared(
+            "gts://gts.x.test12.redreq.user.v1~x.test12._.lax.v1~",
+            "gts://gts.x.test12.redreq.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "email": {"type": "string"},
+                },
+            },
+            "register derived dropping email from required",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.redreq.user.v1~x.test12._.lax.v1~",
+            False,
+            "validate redeclared derived - dropped required field",
+        ),
+    ]
+
+
+class TestCaseOp12_Redeclared_AddsAPFalseTightening_Passes(HttpRunner):
+    """ADR-0001: redeclared derived tightens by adding additionalProperties:false.
+
+    OP#12 requires every valid instance of the derived schema to be valid in
+    the base — i.e. derived may tighten, never loosen. Closing an open base
+    with additionalProperties:false in the derived is a valid tightening and
+    MUST pass. (This replaces an earlier mis-stated case where the assertion
+    was backwards.)
+    """
+
+    config = Config("OP#12 ADR-0001: redeclared AP:false tightening").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.redapf.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "email": {"type": "string"},
+                },
+            },
+            "register open base",
+        ),
+        _register_derived_redeclared(
+            "gts://gts.x.test12.redapf.user.v1~x.test12._.closed.v1~",
+            "gts://gts.x.test12.redapf.user.v1~",
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["userId"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "email": {"type": "string"},
+                },
+            },
+            "register redeclared derived closing open base with AP:false",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.redapf.user.v1~x.test12._.closed.v1~",
+            True,
+            "validate redeclared derived - tightening allowed",
+        ),
+    ]
+
+
+class TestCaseOp12_FinalBase_RedeclaredDerivationStillRejected(HttpRunner):
+    """ADR-0001: x-gts-final enforced from $id chain alone, not body shape.
+
+    Base is final. A derived schema authored WITHOUT allOf (re-declaration
+    form) and otherwise semantically compatible MUST still be rejected,
+    because finality is keyed on the chained $id.
+    """
+
+    config = Config("OP#12 ADR-0001: final base rejects redeclared derivation").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.redfinb.user.v1~",
+            {
+                "type": "object",
+                "x-gts-final": True,
+                "required": ["userId"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "name": {"type": "string"},
+                },
+            },
+            "register final base",
+        ),
+        _register_derived_redeclared(
+            "gts://gts.x.test12.redfinb.user.v1~x.test12._.kid.v1~",
+            "gts://gts.x.test12.redfinb.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "name": {"type": "string"},
+                    "nickname": {"type": "string"},
+                },
+            },
+            "register redeclared derived from final base (no allOf in body)",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.redfinb.user.v1~x.test12._.kid.v1~",
+            False,
+            "validate derived from final base - rejected by $id-chain finality",
+        ),
+    ]
+
+
+class TestCaseOp12_Redeclared_HybridAllOfPlusToplevel(HttpRunner):
+    """ADR-0001: hybrid form — allOf:[{$ref:parent}] AND top-level properties.
+
+    Demonstrates the extension-framing principle: derivation forms are not
+    syntactically restricted. A compatible hybrid form must pass OP#12.
+    """
+
+    config = Config("OP#12 ADR-0001: hybrid allOf + toplevel passes").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.redhyb.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "name": {"type": "string"},
+                },
+            },
+            "register base user",
+        ),
+        Step(
+            RunRequest("register hybrid derived (allOf + top-level properties)")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12.redhyb.user.v1~"
+                    "x.test12._.hybrid.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.redhyb.user.v1~"},
+                ],
+                "properties": {
+                    "tier": {"type": "string"},
+                },
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.redhyb.user.v1~x.test12._.hybrid.v1~",
+            True,
+            "validate hybrid derived - passes",
+        ),
+    ]
+
+
+class TestCaseOp12_Redeclared_ChangePropertyDefaultAllowed(HttpRunner):
+    """§3.1 / OP#12: derived may redeclare a property's `default`.
+
+    Narrowing is defined over the set of valid instances. `default` is a
+    JSON Schema annotation and does not participate in validation, so
+    changing it neither tightens nor loosens the validation surface. A
+    derived type MAY redeclare `properties.<name>.default` freely.
+
+    Base declares `tier.default = "free"`. Derived redeclares
+    `tier.default = "gold"` (with no other changes that would violate
+    OP#12). Validation MUST pass.
+    """
+
+    config = Config("OP#12: redeclare property default allowed").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.pdfl.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "tier": {"type": "string", "default": "free"},
+                },
+            },
+            "register base with tier default=free",
+        ),
+        _register_derived_redeclared(
+            "gts://gts.x.test12.pdfl.user.v1~x.test12._.premium.v1~",
+            "gts://gts.x.test12.pdfl.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "tier": {"type": "string", "default": "gold"},
+                },
+            },
+            "register derived redeclaring tier default=gold",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.pdfl.user.v1~x.test12._.premium.v1~",
+            True,
+            "validate - default redeclaration does not violate OP#12",
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# v0.12 changelog: "the prior $defs MUST NOT and post-Draft-07-keyword
+# restrictions are dropped". README §11.0 (Relationship to JSON Schema)
+# frames GTS as dialect-agnostic; the §9.5 note on $ref now spells out:
+# "definitions for Draft-07, $defs for Draft 2019-09 and later; both are
+# admissible in GTS Type Schemas." This test exercises the dropped
+# restriction directly via a Draft 2019-09 base that defines reusable
+# subschemas in $defs and references them locally.
+# ---------------------------------------------------------------------------
+
+
+class TestCaseOp12_Dialect_2019_09_DefsAllowed(HttpRunner):
+    """v0.12 / ADR-0001: Draft 2019-09 with $defs is a valid GTS Type Schema.
+
+    Before v0.12 the spec forbade $defs and post-Draft-07 keywords. ADR-0001
+    reframes GTS as dialect-agnostic; the README changelog calls this out as
+    a breaking change. Register a base under Draft 2019-09 that uses $defs
+    for a reusable subschema; both registration and validation must succeed.
+    """
+
+    config = Config("OP#12 v0.12: Draft 2019-09 with $$defs allowed").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register Draft 2019-09 base using $$defs")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.dialect09.user.v1~",
+                "$$schema": "https://json-schema.org/draft/2019-09/schema",
+                "type": "object",
+                "$$defs": {
+                    "NonEmptyString": {"type": "string", "minLength": 1},
+                },
+                "required": ["userId", "name"],
+                "properties": {
+                    "userId": {"$$ref": "#/$$defs/NonEmptyString"},
+                    "name": {"$$ref": "#/$$defs/NonEmptyString"},
+                },
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.dialect09.user.v1~",
+            True,
+            "validate Draft 2019-09 base - $$defs admissible",
+        ),
+    ]
+
+
+class TestCaseOp12_Dialect_2020_12_PrefixItemsAllowed(HttpRunner):
+    """v0.12 / ADR-0001: Draft 2020-12 with prefixItems is a valid GTS Type Schema.
+
+    ADR-0001 reframes GTS as dialect-agnostic; README §11.0 lists Draft 2020-12
+    as equally valid and prefixItems among the admissible post-Draft-07 keywords.
+    Register a base under Draft 2020-12 that uses prefixItems; both registration
+    and validation must succeed. (Complements the Draft 2019-09 / $defs case.)
+    """
+
+    config = Config("OP#12 v0.12: Draft 2020-12 with prefixItems allowed").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        Step(
+            RunRequest("register Draft 2020-12 base using prefixItems")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.dialect20.coord.v1~",
+                "$$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "required": ["point"],
+                "properties": {
+                    "point": {
+                        "type": "array",
+                        "prefixItems": [
+                            {"type": "number"},
+                            {"type": "number"},
+                        ],
+                        "items": False,
+                    },
+                },
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.dialect20.coord.v1~",
+            True,
+            "validate Draft 2020-12 base - prefixItems admissible",
+        ),
+    ]
+
+
+class TestCaseOp12_Redeclared_MixedDialectChainRejected(HttpRunner):
+    """A redeclared child cannot change the dialect selected by its root type.
+
+    The Draft-07 root selects the dialect for the complete chained ``$id``
+    hierarchy. The Draft 2019-09 child must therefore fail OP#12 even though it
+    re-declares the inherited fields without ``$ref`` and only tightens them.
+    """
+
+    config = Config(
+        "OP#12: mixed-dialect redeclaration rejected (07 root, 2019-09 child)"
+    ).base_url(get_gts_base_url())
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.mixdia.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "name": {"type": "string", "maxLength": 100},
+                },
+            },
+            "register Draft-07 base",
+        ),
+        Step(
+            RunRequest("register Draft 2019-09 derived re-declaring + tightening")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12.mixdia.user.v1~x.test12._.premium.v1~",
+                "$$schema": "https://json-schema.org/draft/2019-09/schema",
+                "type": "object",
+                "required": ["userId"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "name": {"type": "string", "maxLength": 50},
+                },
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            "gts.x.test12.mixdia.user.v1~x.test12._.premium.v1~",
+            False,
+            "reject mixed-dialect child despite compatible field redeclaration",
+        ),
+    ]
+
+
+class TestCaseOp12_Redeclared_ThreeLevelChainCompatible(HttpRunner):
+    """ADR-0001 / §3.2: 3-level chain A~B~C re-declared without allOf.
+
+    Each level restates the parent's fields directly (no allOf) and tightens
+    `maxLength` monotonically (100 → 80 → 50). OP#12 must hold transitively
+    across the whole multi-level hierarchy (README OP#12 line ~1298). The leaf
+    validates.
+    """
+
+    config = Config("OP#12 ADR-0001: 3-level redeclared chain compatible").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.red3lvl.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId", "name"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "name": {"type": "string", "maxLength": 100},
+                },
+            },
+            "register root A (maxLength 100)",
+        ),
+        _register_derived_redeclared(
+            "gts://gts.x.test12.red3lvl.user.v1~x.test12._.mid.v1~",
+            "gts://gts.x.test12.red3lvl.user.v1~",
+            {
+                "type": "object",
+                "required": ["userId", "name"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "name": {"type": "string", "maxLength": 80},
+                },
+            },
+            "register mid B without allOf (maxLength 80)",
+        ),
+        _register_derived_redeclared(
+            (
+                "gts://gts.x.test12.red3lvl.user.v1~"
+                "x.test12._.mid.v1~x.test12._.leaf.v1~"
+            ),
+            "gts://gts.x.test12.red3lvl.user.v1~x.test12._.mid.v1~",
+            {
+                "type": "object",
+                "required": ["userId", "name"],
+                "properties": {
+                    "userId": {"type": "string"},
+                    "name": {"type": "string", "maxLength": 50},
+                },
+            },
+            "register leaf C without allOf (maxLength 50)",
+        ),
+        _validate_type_schema(
+            (
+                "gts.x.test12.red3lvl.user.v1~"
+                "x.test12._.mid.v1~x.test12._.leaf.v1~"
+            ),
+            True,
+            "validate 3-level redeclared leaf - transitively compatible",
+        ),
+    ]
+
+
+class TestCaseOp12_SchemaRefTargetDependencyMissing(HttpRunner):
+    """Explicit validation must recursively resolve a referenced type's $refs."""
+
+    config = Config("OP#12 - Referenced schema dependency missing").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.reftransitive.target.v1~",
+            {
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.reftransitive.missing.v1~"},
+                ],
+            },
+            "register target schema referencing a missing dependency",
+        ),
+        _register(
+            "gts://gts.x.test12.reftransitive.host.v1~",
+            {
+                "type": "object",
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12.reftransitive.target.v1~"},
+                ],
+            },
+            "register host schema referencing the target",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.reftransitive.target.v1~",
+            False,
+            "validate target - its reference dependency is missing",
+        ),
+        _validate_type_schema(
+            "gts.x.test12.reftransitive.host.v1~",
+            False,
+            "validate host - referenced target has a missing dependency",
+        ),
+    ]
+
+
+class TestCaseOp12_ValidateTypeSchemaRejectsInstanceID(HttpRunner):
+    """Reject an existing GTS Instance passed to the Type Schema validator.
+
+    The registry contains both the instance and its valid Type Schema, so this is
+    not a missing-entity or invalid-instance test. It verifies that
+    ``POST /validate-type-schema`` checks the referenced entity's kind and does
+    not validate an Instance as though it were a Type Schema (or silently
+    validate the Instance's declared type instead). The request itself is valid,
+    so the endpoint returns HTTP 200 with ``ok: false``.
+    """
+
+    config = Config("OP#12 - Reject instance on type-schema endpoint").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    instance_id = "gts.x.test12.kind.event.v1~x.test12._.example.v1"
+    teststeps = [
+        _register(
+            "gts://gts.x.test12.kind.event.v1~",
+            {"type": "object", "properties": {"name": {"type": "string"}}},
+            "register instance type",
+        ),
+        _register_instance(
+            {"id": instance_id, "name": "example"},
+            "register valid instance",
+        ),
+        Step(
+            RunRequest("reject instance ID as type schema")
+            .post("/validate-type-schema")
+            .with_json({"type_id": instance_id})
+            .validate()
+            .assert_equal("status_code", 200)
+            .assert_equal("body.ok", False)
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_CrossDialectRefRejected(HttpRunner):
+    """OP#12 - Type Derivation: a cross-dialect ``$ref`` is rejected (§11.0).
+
+    JSON Schema permits references between schema resources that declare
+    different dialects. GTS deliberately applies a stricter portability rule:
+    every reference in a GTS Type Schema must preserve the hierarchy's selected
+    dialect. A Type Schema that derives via ``allOf`` + ``$ref`` from a parent
+    declaring a different dialect therefore MUST be rejected. Registration
+    itself does not validate, so both POSTs return 200; the mismatch surfaces at
+    ``/validate-type-schema``.
+    """
+
+    config = Config("OP#12 - Cross-dialect ref rejected").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    derived_type_id = (
+        "gts.x.test12xd.base.item.v1~x.test12xd._.child.v1~"
+    )
+    teststeps = [
+        Step(
+            RunRequest("register 2020-12 base schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12xd.base.item.v1~",
+                "$$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "required": ["a"],
+                "properties": {"a": {"type": "string"}},
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register draft-07 child deriving via allOf+$ref")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12xd.base.item.v1~"
+                    "x.test12xd._.child.v1~"
+                ),
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["a"],
+                "properties": {"a": {"type": "string"}},
+                "allOf": [
+                    {"$$ref": "gts://gts.x.test12xd.base.item.v1~"},
+                ],
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            derived_type_id,
+            False,
+            "cross-dialect ref derivation must be rejected",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_CrossDialectEmbeddedRefRejected(HttpRunner):
+    """OP#12 - A document-local $ref cannot cross a schema dialect boundary.
+
+    JSON Schema permits compound documents containing embedded resources that
+    declare different dialects. GTS deliberately prohibits every cross-dialect
+    reference, including a local fragment reference to an embedded resource in
+    the same document.
+    """
+
+    config = Config("OP#12 - Cross-dialect embedded ref rejected").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    type_id = "gts.x.test12xd.embedded.item.v1~"
+    teststeps = [
+        Step(
+            RunRequest("register 2020-12 type with referenced Draft-07 resource")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://" + type_id,
+                "$$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "legacy": {"$$ref": "#/$$defs/legacy"},
+                },
+                "$$defs": {
+                    "legacy": {
+                        "$$id": "legacy",
+                        "$$schema": "http://json-schema.org/draft-07/schema#",
+                        "type": "string",
+                    },
+                },
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            type_id,
+            False,
+            "document-local cross-dialect ref must be rejected",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_CrossDialectRedeclarationRejected(HttpRunner):
+    """OP#12 - changing dialect is invalid even without ``$ref`` (§11.0).
+
+    Derivation is established by the chained ``$id`` alone (ADR-0001), and the
+    root Type Schema selects the dialect for that complete hierarchy. Repeating
+    the parent's fields instead of composing them with ``$ref`` does not permit
+    the child to select a different dialect.
+    """
+
+    config = Config("OP#12 - Cross-dialect redeclaration rejected").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    derived_type_id = (
+        "gts.x.test12rd.base.item.v1~x.test12rd._.child.v1~"
+    )
+    teststeps = [
+        Step(
+            RunRequest("register draft-07 base schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12rd.base.item.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["a"],
+                "properties": {"a": {"type": "string"}},
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register 2020-12 child that re-declares fields (no $ref)")
+            .post("/entities")
+            .with_json({
+                "$$id": (
+                    "gts://gts.x.test12rd.base.item.v1~"
+                    "x.test12rd._.child.v1~"
+                ),
+                "$$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "required": ["a"],
+                "properties": {"a": {"type": "string"}},
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        _validate_type_schema(
+            derived_type_id,
+            False,
+            "cross-dialect redeclaration must be rejected",
+        ),
+    ]
+
+
+class TestCaseTestOp12TypeDerivationValidation_AncestorCrossDialectRefRejected(HttpRunner):
+    """OP#12 - A cross-dialect ``$ref`` on an *ancestor* invalidates the descendant.
+
+    §11.0: every reference in a derivation hierarchy must preserve the root's
+    dialect, and §12: a type is only as valid as the types it builds on. Here the
+    root/ancestor ``base`` (Draft-07) references a Draft 2020-12 schema; the
+    descendant ``child`` derives by chained ``$id`` re-declaration, redeclares
+    ``ext`` compatibly without ``$ref``, and does NOT itself reference the
+    2020-12 schema. Validating the descendant must still be rejected, because
+    its ancestor is invalid.
+
+    This isolates the ancestor dialect check from derivation incompatibility:
+    because ``child`` compatibly redeclares ``ext``, it would be accepted if
+    ancestor validity were not checked. An implementation that only walks the
+    *selected* type's reference graph (rather than the whole chain + reference
+    closure, as the reference implementation does) would wrongly accept the
+    descendant.
+    """
+
+    config = Config("OP#12 - Ancestor cross-dialect ref rejected").base_url(
+        get_gts_base_url()
+    )
+
+    def test_start(self):
+        super().test_start()
+
+    child_type_id = "gts.x.test12anc.base.item.v1~x.test12anc._.child.v1~"
+    teststeps = [
+        Step(
+            RunRequest("register Draft 2020-12 referenced schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12anc.ext.detail.v1~",
+                "$$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {"note": {"type": "string"}},
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        Step(
+            RunRequest("register Draft-07 ancestor referencing the 2020-12 schema")
+            .post("/entities")
+            .with_json({
+                "$$id": "gts://gts.x.test12anc.base.item.v1~",
+                "$$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {
+                    "ext": {"$$ref": "gts://gts.x.test12anc.ext.detail.v1~"},
+                },
+            })
+            .validate()
+            .assert_equal("status_code", 200)
+        ),
+        # The ancestor itself is invalid (leaf case, all implementations catch it).
+        _validate_type_schema(
+            "gts.x.test12anc.base.item.v1~",
+            False,
+            "ancestor with cross-dialect ref is invalid (control)",
+        ),
+        _register_derived_redeclared(
+            "gts://gts.x.test12anc.base.item.v1~x.test12anc._.child.v1~",
+            "gts://gts.x.test12anc.base.item.v1~",
+            {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "ext": {
+                        "type": "object",
+                        "properties": {"note": {"type": "string"}},
+                    },
+                },
+            },
+            "register descendant by re-declaration (no ref to ancestor or target)",
+        ),
+        # The descendant does not reference the 2020-12 schema, but its ancestor
+        # does — so it must be rejected too.
+        _validate_type_schema(
+            child_type_id,
+            False,
+            "descendant of an ancestor with a cross-dialect ref must be rejected",
+        ),
+    ]
+
+
+if __name__ == "__main__":
+    TestCaseTestOp12TypeDerivationValidation_DerivedSchemaFullyMatches().test_start()

@@ -1,0 +1,15 @@
+name: code-ranker
+on:
+  pull_request:
+  push:
+jobs:
+  code-ranker:
+    # Pinned to an immutable commit SHA (supply-chain hardening).
+    uses: code-ranker-com/actions/.github/workflows/report.yml@f5df154e14f221757012ec87455ec423e6ce3df9
+    permissions:
+      id-token: write
+      contents: read
+      # No pull-requests: write here — the code-ranker GitHub App posts (and
+      # updates in place) the report comment using its own installation
+      # token, not this workflow's GITHUB_TOKEN.
+      security-events: write
